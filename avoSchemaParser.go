@@ -4,14 +4,14 @@ import (
 	"strconv"
 )
 
-// PropertyChild represents a child property in the schema
+// Property represents a schema of a single event property
 type Property struct {
 	PropertyName string     `json:"propertyName"`
 	PropertyType string     `json:"propertyType"`
 	Children     []Property `json:"children,omitempty"`
 }
 
-// ExtractSchema extracts the schema of a map of string keys to values of any type
+// extractSchema extracts the schema of event properties
 func ExtractSchema(eventProperties map[string]interface{}) []struct {
 	PropertyName string     `json:"propertyName"`
 	PropertyType string     `json:"propertyType"`
@@ -60,7 +60,7 @@ func getType(value interface{}) string {
 	}
 }
 
-// getChildren returns the children of a value
+// getChildren returns the children of a value if it's an object or a list
 func getChildren(value interface{}) []Property {
 	switch v := value.(type) {
 	case []interface{}:
