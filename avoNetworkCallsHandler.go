@@ -35,6 +35,7 @@ type EventSchemaBody struct {
 	Type            string     `json:"type"`
 	EventName       string     `json:"eventName"`
 	EventProperties []Property `json:"eventProperties"`
+	AvoFunction     bool       `json:"avoFunction"`
 	EventId         string     `json:"eventId"`
 	EventHash       string     `json:"eventHash"`
 }

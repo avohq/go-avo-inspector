@@ -13,14 +13,6 @@ const (
 	Staging AvoInspectorEnv = "staging"
 )
 
-/* type AvoInspector struct {
-	apiKey    string
-	env       AvoInspectorEnv
-	version   string
-	appName   string
-	shouldLog bool
-} */
-
 type AvoInspector struct {
 	apiKey                 string
 	environment            AvoInspectorEnv
@@ -59,24 +51,6 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, version string, appName
 func (c *AvoInspector) shouldLogMethod(shouldLog bool) {
 	c.shouldLog = shouldLog
 }
-
-/* func (c *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) []Property {
-	if c.shouldLog {
-		fmt.Printf("Event name: %s\n", eventName)
-	}
-
-	result := extractSchema(eventProperties)
-
-	if c.shouldLog {
-		fmt.Println(map[string]interface{}{
-			"event_name":       eventName,
-			"event_properties": eventProperties,
-			"schema":           result,
-		})
-	}
-
-	return result
-} */
 
 func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
 	if inspector.shouldLog {
