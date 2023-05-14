@@ -4,15 +4,23 @@ import (
 	"fmt"
 )
 
+type AvoInspectorEnv string
+
+const (
+	Prod    AvoInspectorEnv = "prod"
+	Dev     AvoInspectorEnv = "dev"
+	Staging AvoInspectorEnv = "staging"
+)
+
 type AvoInspector struct {
 	apiKey    string
-	env       string
+	env       AvoInspectorEnv
 	version   string
 	appName   string
 	shouldLog bool
 }
 
-func NewAvoInspector(apiKey string, env string, version string, appName string) *AvoInspector {
+func NewAvoInspector(apiKey string, env AvoInspectorEnv, version string, appName string) *AvoInspector {
 	return &AvoInspector{
 		apiKey:    apiKey,
 		env:       env,
