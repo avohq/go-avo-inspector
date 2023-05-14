@@ -35,7 +35,6 @@ type EventSchemaBody struct {
 	Type            string     `json:"type"`
 	EventName       string     `json:"eventName"`
 	EventProperties []Property `json:"eventProperties"`
-	AvoFunction     bool       `json:"avoFunction"`
 	EventId         string     `json:"eventId"`
 	EventHash       string     `json:"eventHash"`
 }
@@ -52,7 +51,7 @@ type AvoNetworkCallsHandler struct {
 
 const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
-func NewAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
+func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
 		apiKey:       apiKey,
 		envName:      envName,
@@ -64,7 +63,7 @@ func NewAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion 
 	}
 }
 
-func (h *AvoNetworkCallsHandler) CallInspectorWithBatchBody(events []interface{}) error {
+func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}) error {
 	eventsPayload, err := json.Marshal(events)
 	if err != nil {
 		return fmt.Errorf("could not marshal events: %v", err)
@@ -133,7 +132,7 @@ func (h *AvoNetworkCallsHandler) CallInspectorWithBatchBody(events []interface{}
 	return nil
 }
 
-func (avo *AvoNetworkCallsHandler) BodyForSessionStartedCall(sessionId string) SessionStartedBody {
+func (avo *AvoNetworkCallsHandler) bodyForSessionStartedCall(sessionId string) SessionStartedBody {
 	sessionBody := SessionStartedBody{
 		BaseBody: avo.createBaseCallBody(sessionId),
 		Type:     "sessionStarted",
@@ -141,22 +140,12 @@ func (avo *AvoNetworkCallsHandler) BodyForSessionStartedCall(sessionId string) S
 	return sessionBody
 }
 
-func (avo *AvoNetworkCallsHandler) BodyForEventSchemaCall(sessionId string, eventName string, eventProperties []Property, eventId *string, eventHash *string) EventSchemaBody {
+func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(sessionId string, eventName string, eventProperties []Property) EventSchemaBody {
 	eventSchemaBody := EventSchemaBody{
 		BaseBody:        avo.createBaseCallBody(sessionId),
 		Type:            "event",
 		EventName:       eventName,
 		EventProperties: eventProperties,
-	}
-
-	if eventId != nil {
-		eventSchemaBody.AvoFunction = true
-		eventSchemaBody.EventId = *eventId
-		eventSchemaBody.EventHash = *eventHash
-	} else {
-		eventSchemaBody.AvoFunction = false
-		eventSchemaBody.EventId = ""
-		eventSchemaBody.EventHash = ""
 	}
 
 	return eventSchemaBody
