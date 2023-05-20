@@ -36,7 +36,7 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, version string, appName
 	}
 
 	shouldLog := env == Dev
-	libVersion := "0.0.1"
+	libVersion := "1.0.0"
 	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, version, libVersion, shouldLog)
 
 	return &AvoInspector{
