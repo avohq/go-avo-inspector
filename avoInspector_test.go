@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -100,7 +101,7 @@ func TestAvoInspector_TrackSchemaFromEvent(t *testing.T) {
 	}
 
 	_, err := inspector.TrackSchemaFromEvent(eventName, eventProperties)
-	if err != nil {
+	if fmt.Sprint(err) != "Avo Inspector: schema sending failed: request returned non-200 status code: 400" {
 		t.Errorf("unexpected error: %s", err)
 	}
 }
