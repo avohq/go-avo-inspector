@@ -13,11 +13,7 @@ type Property struct {
 
 // extractSchema extracts the schema of event properties
 func extractSchema(eventProperties map[string]interface{}) []Property {
-	var result []Property /* struct {
-		PropertyName string     `json:"propertyName"`
-		PropertyType string     `json:"propertyType"`
-		Children     []Property `json:"children,omitempty"`
-	} */
+	var result []Property
 
 	for key, value := range eventProperties {
 		result = append(result, struct {

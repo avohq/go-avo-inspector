@@ -17,7 +17,7 @@ Obtain the API key at [Avo.app](https://www.avo.app/welcome)
 
 ```go
 import (
-	"github.com/avohq/go-avo-inspector"
+	avoinspector "github.com/avohq/go-avo-inspector"
 )
 
 avoInspector, err := avoinspector.NewAvoInspector(
