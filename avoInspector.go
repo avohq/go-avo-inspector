@@ -21,7 +21,7 @@ type AvoInspector struct {
 	shouldLog              bool
 }
 
-func NewAvoInspector(apiKey string, env AvoInspectorEnv, version string, appName string) (*AvoInspector, error) {
+func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appName string) (*AvoInspector, error) {
 	if env == "" {
 		env = Dev
 		fmt.Println("[Avo Inspector] No environment provided. Defaulting to dev.")
@@ -31,24 +31,24 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, version string, appName
 		return nil, errors.New("[Avo Inspector] No API key provided. Inspector can't operate without API key.")
 	}
 
-	if version == "" {
+	if appVersion == "" {
 		return nil, errors.New("[Avo Inspector] No version provided. Some features of Inspector rely on versioning. Please provide comparable string version, i.e. integer or semantic.")
 	}
 
 	shouldLog := env == Dev
 	libVersion := "1.0.0"
-	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, version, libVersion, shouldLog)
+	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, appVersion, libVersion, shouldLog)
 
 	return &AvoInspector{
 		apiKey:                 apiKey,
 		environment:            env,
-		version:                version,
+		version:                appVersion,
 		avoNetworkCallsHandler: avoNetworkCallsHandler,
 		shouldLog:              shouldLog,
 	}, nil
 }
 
-func (c *AvoInspector) shouldLogMethod(shouldLog bool) {
+func (c *AvoInspector) ShouldLog(shouldLog bool) {
 	c.shouldLog = shouldLog
 }
 
