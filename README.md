@@ -24,7 +24,7 @@ avoInspector, err := avoinspector.NewAvoInspector(
     "...", // Your API key obtained in the Avo workspace
     avoinspector.Dev, // or avoinspector.Stafging, avoinspector.Prod
     "1.0", // App version
-    "my app" // App name
+    "my app", // App name
     )
 
 ```
@@ -59,7 +59,8 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 		"obj":  map[string]interface{}{"a": 1, "b": "two", "c": []interface{}{true, 3.14}},
 		"unk":  complex(1, 2),
 		"func": func() {},
-	})
+	},
+)
 ```
 
 ## Author
