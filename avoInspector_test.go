@@ -75,12 +75,12 @@ func TestNewAvoInspector_WithEmptyVersion(t *testing.T) {
 func TestAvoInspector_shouldLogMethod(t *testing.T) {
 	inspector := &AvoInspector{}
 
-	inspector.shouldLogMethod(true)
+	inspector.ShouldLog(true)
 	if inspector.shouldLog != true {
 		t.Error("expected shouldLog to be true, got false")
 	}
 
-	inspector.shouldLogMethod(false)
+	inspector.ShouldLog(false)
 	if inspector.shouldLog != false {
 		t.Error("expected shouldLog to be false, got true")
 	}
