@@ -8,7 +8,7 @@ This is a quick start guide. For more information about the Inspector project pl
 
 
 ```
-    go get github.com/avohq/go-avo-inspector
+go get github.com/avohq/go-avo-inspector
 ```
 
 ## Initialization
@@ -22,7 +22,7 @@ import (
 
 avoInspector, err := avoinspector.NewAvoInspector(
     "...", // Your API key obtained in the Avo workspace
-    avoinspector.Dev, // or avoinspector.Stafging, avoinspector.Prod
+    avoinspector.Dev, // or avoinspector.Staging, avoinspector.Prod
     "1.0", // App version
     "my app", // App name
     )
@@ -50,17 +50,16 @@ It is the easiest way to use the library, just call this method at the same plac
 
 ```go
 result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interface{}{
-		"str":  "hello",
-		"int":  42,
-		"flt":  3.14,
-		"bol":  true,
-		"nul":  nil,
-		"lst":  []interface{}{"foo", "bar", nil, map[string]interface{}{"d": 42}},
-		"obj":  map[string]interface{}{"a": 1, "b": "two", "c": []interface{}{true, 3.14}},
-		"unk":  complex(1, 2),
-		"func": func() {},
-	},
-)
+	"str":  "hello",
+	"int":  42,
+	"flt":  3.14,
+	"bol":  true,
+	"nul":  nil,
+	"lst":  []interface{}{"foo", "bar", nil, map[string]interface{}{"d": 42}},
+	"obj":  map[string]interface{}{"a": 1, "b": "two", "c": []interface{}{true, 3.14}},
+	"unk":  complex(1, 2),
+	"func": func() {},
+})
 ```
 
 ## Author
