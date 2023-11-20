@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -91,6 +92,53 @@ func TestAvoNetworkCallsHandler_callInspectorWithBatchBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAvoNetworkCallsHandler_callInspectorWithBatchBodyConcurrent(t *testing.T) {
+	// Setup a test server to mock the communication with Avo Inspector
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"samplingRate": 0.001}`))
+	}))
+	defer srv.Close()
+
+	// Create a single instance of AvoNetworkCallsHandler meant to be used concurrently
+	handler := &AvoNetworkCallsHandler{
+		apiKey:           "test-api-key",
+		envName:          "test",
+		appName:          "test-app",
+		appVersion:       "1.0.0",
+		libVersion:       "1.0.0",
+		samplingRate:     1.0,
+		shouldLog:        false,
+		trackingEndpoint: srv.URL,
+	}
+
+	// Define a function to be called concurrently to assert that the sampling rate can be read/written safely
+	call := func(wg *sync.WaitGroup) {
+		// Signal that we're done with this goroutine
+		defer wg.Done()
+
+		// Create a valid event
+		event := map[string]any{
+			"number_prop":  1,
+			"string_prop":  "test",
+			"boolean_prop": true,
+		}
+
+		// Verify the result
+		err := handler.callInspectorWithBatchBody([]any{event})
+		if err != nil {
+			t.Errorf("unexpected error, got: %s", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go call(&wg)
+	}
+	wg.Wait()
 }
 
 func TestAvoNetworkCallsHandler_bodyForSessionStartedCall(t *testing.T) {
