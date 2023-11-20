@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -113,7 +113,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	}
 
 	// Read response body
-	responseBody, err := ioutil.ReadAll(res.Body)
+	responseBody, err := io.ReadAll(res.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %v", err)
 	}
