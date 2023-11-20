@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -51,6 +52,8 @@ type AvoNetworkCallsHandler struct {
 	trackingEndpoint string
 }
 
+var samplingRateMutex sync.RWMutex
+
 const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
 func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
@@ -76,7 +79,10 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 		return nil
 	}
 
-	if rand.Float64() > h.samplingRate {
+	samplingRateMutex.RLock()
+	samplingRate := h.samplingRate
+	samplingRateMutex.RUnlock()
+	if rand.Float64() > samplingRate {
 		if h.shouldLog {
 			log.Println("Avo Inspector: last event schema dropped due to sampling rate.")
 		}
@@ -130,7 +136,9 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 		return fmt.Errorf("failed to parse response body: %v", err)
 	}
 
+	samplingRateMutex.Lock()
 	h.samplingRate = responseData.SamplingRate
+	samplingRateMutex.Unlock()
 
 	return nil
 }
