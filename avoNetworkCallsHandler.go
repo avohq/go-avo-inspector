@@ -41,26 +41,28 @@ type EventSchemaBody struct {
 }
 
 type AvoNetworkCallsHandler struct {
-	apiKey       string
-	envName      string
-	appName      string
-	appVersion   string
-	libVersion   string
-	samplingRate float64
-	shouldLog    bool
+	apiKey           string
+	envName          string
+	appName          string
+	appVersion       string
+	libVersion       string
+	samplingRate     float64
+	shouldLog        bool
+	trackingEndpoint string
 }
 
 const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
 func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
-		apiKey:       apiKey,
-		envName:      envName,
-		appName:      appName,
-		appVersion:   appVersion,
-		libVersion:   libVersion,
-		samplingRate: 1.0,
-		shouldLog:    shouldLog,
+		apiKey:           apiKey,
+		envName:          envName,
+		appName:          appName,
+		appVersion:       appVersion,
+		libVersion:       libVersion,
+		samplingRate:     1.0,
+		shouldLog:        shouldLog,
+		trackingEndpoint: trackingEndpoint,
 	}
 }
 
@@ -94,7 +96,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	}
 
 	client := http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, trackingEndpoint, bytes.NewReader(eventsPayload))
+	req, err := http.NewRequest(http.MethodPost, h.trackingEndpoint, bytes.NewReader(eventsPayload))
 	if err != nil {
 		return fmt.Errorf("could not create request: %v", err)
 	}
