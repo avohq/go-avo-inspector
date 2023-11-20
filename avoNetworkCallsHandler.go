@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -41,26 +42,30 @@ type EventSchemaBody struct {
 }
 
 type AvoNetworkCallsHandler struct {
-	apiKey       string
-	envName      string
-	appName      string
-	appVersion   string
-	libVersion   string
-	samplingRate float64
-	shouldLog    bool
+	apiKey           string
+	envName          string
+	appName          string
+	appVersion       string
+	libVersion       string
+	samplingRate     float64
+	shouldLog        bool
+	trackingEndpoint string
 }
+
+var samplingRateMutex sync.RWMutex
 
 const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
 func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
-		apiKey:       apiKey,
-		envName:      envName,
-		appName:      appName,
-		appVersion:   appVersion,
-		libVersion:   libVersion,
-		samplingRate: 1.0,
-		shouldLog:    shouldLog,
+		apiKey:           apiKey,
+		envName:          envName,
+		appName:          appName,
+		appVersion:       appVersion,
+		libVersion:       libVersion,
+		samplingRate:     1.0,
+		shouldLog:        shouldLog,
+		trackingEndpoint: trackingEndpoint,
 	}
 }
 
@@ -74,7 +79,10 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 		return nil
 	}
 
-	if rand.Float64() > h.samplingRate {
+	samplingRateMutex.RLock()
+	samplingRate := h.samplingRate
+	samplingRateMutex.RUnlock()
+	if rand.Float64() > samplingRate {
 		if h.shouldLog {
 			log.Println("Avo Inspector: last event schema dropped due to sampling rate.")
 		}
@@ -94,7 +102,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	}
 
 	client := http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, trackingEndpoint, bytes.NewReader(eventsPayload))
+	req, err := http.NewRequest(http.MethodPost, h.trackingEndpoint, bytes.NewReader(eventsPayload))
 	if err != nil {
 		return fmt.Errorf("could not create request: %v", err)
 	}
@@ -113,7 +121,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	}
 
 	// Read response body
-	responseBody, err := ioutil.ReadAll(res.Body)
+	responseBody, err := io.ReadAll(res.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %v", err)
 	}
@@ -128,7 +136,9 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 		return fmt.Errorf("failed to parse response body: %v", err)
 	}
 
+	samplingRateMutex.Lock()
 	h.samplingRate = responseData.SamplingRate
+	samplingRateMutex.Unlock()
 
 	return nil
 }
