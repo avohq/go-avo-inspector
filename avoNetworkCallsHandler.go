@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const defaultHTTPTimeout = 10 * time.Second
+
 type BaseBody struct {
 	ApiKey       string  `json:"apiKey"`
 	AppName      string  `json:"appName"`
@@ -48,6 +50,7 @@ type AvoNetworkCallsHandler struct {
 	libVersion   string
 	samplingRate float64
 	shouldLog    bool
+	httpClient   *http.Client
 }
 
 const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
@@ -61,6 +64,9 @@ func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion 
 		libVersion:   libVersion,
 		samplingRate: 1.0,
 		shouldLog:    shouldLog,
+		httpClient: &http.Client{
+			Timeout: defaultHTTPTimeout,
+		},
 	}
 }
 
@@ -93,7 +99,6 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 		}
 	}
 
-	client := http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(http.MethodPost, trackingEndpoint, bytes.NewReader(eventsPayload))
 	if err != nil {
 		return fmt.Errorf("could not create request: %v", err)
@@ -102,7 +107,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	req.Header.Set("Content-Type", "text/plain")
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(eventsPayload)))
 
-	res, err := client.Do(req)
+	res, err := h.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %v", err)
 	}

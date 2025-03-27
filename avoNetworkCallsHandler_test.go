@@ -7,15 +7,14 @@ import (
 
 func TestAvoNetworkCallsHandler_bodyForSessionStartedCall(t *testing.T) {
 	// Create an instance of AvoNetworkCallsHandler
-	handler := &AvoNetworkCallsHandler{
-		apiKey:       "test-api-key",
-		envName:      "test",
-		appName:      "test-app",
-		appVersion:   "1.0.0",
-		libVersion:   "1.0.0",
-		samplingRate: 1.0,
-		shouldLog:    false,
-	}
+	handler := newAvoNetworkCallsHandler(
+		"test-api-key",
+		"test",
+		"test-app",
+		"1.0.0",
+		"1.0.0",
+		false,
+	)
 
 	// Mock newGuid function
 	newGuid = func() string {
@@ -50,15 +49,14 @@ func TestAvoNetworkCallsHandler_bodyForSessionStartedCall(t *testing.T) {
 
 func TestAvoNetworkCallsHandler_bodyForEventSchemaCall(t *testing.T) {
 	// Create an instance of AvoNetworkCallsHandler
-	handler := &AvoNetworkCallsHandler{
-		apiKey:       "test-api-key",
-		envName:      "test",
-		appName:      "test-app",
-		appVersion:   "1.0.0",
-		libVersion:   "1.0.0",
-		samplingRate: 1.0,
-		shouldLog:    false,
-	}
+	handler := newAvoNetworkCallsHandler(
+		"test-api-key",
+		"test",
+		"test-app",
+		"1.0.0",
+		"1.0.0",
+		false,
+	)
 
 	// Mock newGuid function
 	newGuid = func() string {
