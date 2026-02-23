@@ -3,6 +3,8 @@ package avoinspector
 import (
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 )
 
 type AvoInspectorEnv string
@@ -19,9 +21,16 @@ type AvoInspector struct {
 	version                string
 	avoNetworkCallsHandler *AvoNetworkCallsHandler
 	shouldLog              bool
+	// publicEncryptionKey is reserved for STORY-13 (Go payload encryption).
+	// Currently stored but not yet used for encryption operations.
+	publicEncryptionKey string
 }
 
 func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appName string) (*AvoInspector, error) {
+	return NewAvoInspectorWithEncryption(apiKey, env, appVersion, appName, "")
+}
+
+func NewAvoInspectorWithEncryption(apiKey string, env AvoInspectorEnv, appVersion string, appName string, publicEncryptionKey string) (*AvoInspector, error) {
 	if env == "" {
 		env = Dev
 		fmt.Println("[Avo Inspector] No environment provided. Defaulting to dev.")
@@ -45,6 +54,7 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appN
 		version:                appVersion,
 		avoNetworkCallsHandler: avoNetworkCallsHandler,
 		shouldLog:              shouldLog,
+		publicEncryptionKey:    publicEncryptionKey,
 	}, nil
 }
 
@@ -53,15 +63,21 @@ func (c *AvoInspector) ShouldLog(shouldLog bool) {
 }
 
 func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
+	return inspector.TrackSchemaFromEventWithStreamId(eventName, eventProperties, "")
+}
+
+func (inspector *AvoInspector) TrackSchemaFromEventWithStreamId(eventName string, eventProperties map[string]interface{}, streamId string) ([]Property, error) {
+	if strings.Contains(streamId, ":") {
+		log.Printf("[Avo Inspector] Warning: streamId contains ':' which is not supported")
+	}
+
 	if inspector.shouldLog {
 		fmt.Printf("Avo Inspector: supplied event %s with params %v\n", eventName, eventProperties)
 	}
 
 	eventSchema := extractSchema(eventProperties)
-	sessionID := newGuid()
 	inspectorBatchBody := []any{
-		inspector.avoNetworkCallsHandler.bodyForSessionStartedCall(sessionID),
-		inspector.avoNetworkCallsHandler.bodyForEventSchemaCall(sessionID, eventName, eventSchema),
+		inspector.avoNetworkCallsHandler.bodyForEventSchemaCall(streamId, eventName, eventSchema),
 	}
 
 	err := inspector.avoNetworkCallsHandler.callInspectorWithBatchBody(inspectorBatchBody)
