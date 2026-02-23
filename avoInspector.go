@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const defaultSpecEndpoint = "https://api.avo.app/inspector/v1"
+
 type AvoInspectorEnv string
 
 const (
@@ -24,6 +26,8 @@ type AvoInspector struct {
 	// publicEncryptionKey is reserved for STORY-13 (Go payload encryption).
 	// Currently stored but not yet used for encryption operations.
 	publicEncryptionKey string
+	specFetcher         *eventSpecFetcher
+	specCache           *eventSpecCache
 }
 
 func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appName string) (*AvoInspector, error) {
@@ -55,11 +59,74 @@ func NewAvoInspectorWithEncryption(apiKey string, env AvoInspectorEnv, appVersio
 		avoNetworkCallsHandler: avoNetworkCallsHandler,
 		shouldLog:              shouldLog,
 		publicEncryptionKey:    publicEncryptionKey,
+		specCache:              newEventSpecCache(),
 	}, nil
 }
 
 func (c *AvoInspector) ShouldLog(shouldLog bool) {
 	c.shouldLog = shouldLog
+}
+
+// EnableValidation enables async event spec validation for non-prod environments.
+// In production, this is a no-op. Call this after creating an inspector to activate
+// spec fetching and validation in dev/staging.
+func (inspector *AvoInspector) EnableValidation() {
+	if inspector.environment != Prod && inspector.specFetcher == nil {
+		inspector.specFetcher = newEventSpecFetcher(defaultSpecEndpoint)
+	}
+}
+
+// isValidationEnabled returns true if event spec validation is active.
+// Validation is active in dev and staging only, NOT in prod.
+func (inspector *AvoInspector) isValidationEnabled() bool {
+	return inspector.environment == Dev || inspector.environment == Staging
+}
+
+// fetchAndValidateAsync fetches the event spec and validates properties asynchronously.
+// Does nothing if validation is not enabled (prod environment) or if specFetcher is not set.
+func (inspector *AvoInspector) fetchAndValidateAsync(eventName string, streamId string, eventSchema []Property) {
+	if !inspector.isValidationEnabled() || inspector.specFetcher == nil {
+		return
+	}
+
+	cacheKey := specCacheKey(inspector.apiKey, streamId, eventName)
+
+	// Check cache first
+	if spec, ok := inspector.specCache.get(cacheKey); ok {
+		if spec != nil {
+			result := validateEventSpec(spec, eventSchema)
+			if len(result.Errors) > 0 && inspector.shouldLog {
+				for _, e := range result.Errors {
+					log.Printf("[Avo Inspector] Validation error for '%s': %s", eventName, e)
+				}
+			}
+		}
+		return
+	}
+
+	// Fetch async
+	inspector.specFetcher.fetchAsync(inspector.apiKey, streamId, eventName, func(spec *EventSpecResponse, err error) {
+		if err != nil {
+			if inspector.shouldLog {
+				log.Printf("[Avo Inspector] Failed to fetch spec for '%s': %v", eventName, err)
+			}
+			// Cache nil to avoid re-fetching on failure
+			inspector.specCache.set(cacheKey, nil)
+			return
+		}
+
+		// Cache the result (including nil)
+		inspector.specCache.set(cacheKey, spec)
+
+		if spec != nil {
+			result := validateEventSpec(spec, eventSchema)
+			if len(result.Errors) > 0 && inspector.shouldLog {
+				for _, e := range result.Errors {
+					log.Printf("[Avo Inspector] Validation error for '%s': %s", eventName, e)
+				}
+			}
+		}
+	})
 }
 
 func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
@@ -76,6 +143,10 @@ func (inspector *AvoInspector) TrackSchemaFromEventWithStreamId(eventName string
 	}
 
 	eventSchema := extractSchema(eventProperties)
+
+	// Trigger async spec validation (dev/staging only)
+	inspector.fetchAndValidateAsync(eventName, streamId, eventSchema)
+
 	inspectorBatchBody := []any{
 		inspector.avoNetworkCallsHandler.bodyForEventSchemaCall(streamId, eventName, eventSchema),
 	}
