@@ -50,7 +50,7 @@ func NewAvoInspectorWithEncryption(apiKey string, env AvoInspectorEnv, appVersio
 
 	shouldLog := env == Dev
 	libVersion := "1.0.0"
-	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, appVersion, libVersion, shouldLog)
+	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, appVersion, libVersion, shouldLog, publicEncryptionKey)
 
 	return &AvoInspector{
 		apiKey:                 apiKey,

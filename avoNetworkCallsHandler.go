@@ -12,51 +12,54 @@ import (
 )
 
 type BaseBody struct {
-	ApiKey       string  `json:"apiKey"`
-	AppName      string  `json:"appName"`
-	AppVersion   string  `json:"appVersion"`
-	LibVersion   string  `json:"libVersion"`
-	Env          string  `json:"env"`
-	LibPlatform  string  `json:"libPlatform"`
-	MessageId    string  `json:"messageId"`
-	AnonymousId  string  `json:"anonymousId"`
-	CreatedAt    string  `json:"createdAt"`
-	SamplingRate float64 `json:"samplingRate"`
+	ApiKey              string  `json:"apiKey"`
+	AppName             string  `json:"appName"`
+	AppVersion          string  `json:"appVersion"`
+	LibVersion          string  `json:"libVersion"`
+	Env                 string  `json:"env"`
+	LibPlatform         string  `json:"libPlatform"`
+	MessageId           string  `json:"messageId"`
+	AnonymousId         string  `json:"anonymousId"`
+	CreatedAt           string  `json:"createdAt"`
+	SamplingRate        float64 `json:"samplingRate"`
+	PublicEncryptionKey string  `json:"publicEncryptionKey,omitempty"`
 }
 
 type EventSchemaBody struct {
 	BaseBody
-	Type            string     `json:"type"`
-	EventName       string     `json:"eventName"`
-	EventProperties []Property `json:"eventProperties"`
-	AvoFunction     bool       `json:"avoFunction"`
-	EventId         string     `json:"eventId"`
-	EventHash       string     `json:"eventHash"`
+	Type            string      `json:"type"`
+	EventName       string      `json:"eventName"`
+	EventProperties interface{} `json:"eventProperties"`
+	AvoFunction     bool        `json:"avoFunction"`
+	EventId         string      `json:"eventId"`
+	EventHash       string      `json:"eventHash"`
 }
 
 type AvoNetworkCallsHandler struct {
-	apiKey          string
-	envName         string
-	appName         string
-	appVersion      string
-	libVersion      string
-	samplingRate    float64
-	shouldLog       bool
-	trackingEndpoint string
+	apiKey              string
+	envName             string
+	appName             string
+	appVersion          string
+	libVersion          string
+	samplingRate        float64
+	shouldLog           bool
+	trackingEndpoint    string
+	publicEncryptionKey string
 }
 
 const defaultTrackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
-func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
+func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool, publicEncryptionKey string) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
-		apiKey:           apiKey,
-		envName:          envName,
-		appName:          appName,
-		appVersion:       appVersion,
-		libVersion:       libVersion,
-		samplingRate:     1.0,
-		shouldLog:        shouldLog,
-		trackingEndpoint: defaultTrackingEndpoint,
+		apiKey:              apiKey,
+		envName:             envName,
+		appName:             appName,
+		appVersion:          appVersion,
+		libVersion:          libVersion,
+		samplingRate:        1.0,
+		shouldLog:           shouldLog,
+		trackingEndpoint:    defaultTrackingEndpoint,
+		publicEncryptionKey: publicEncryptionKey,
 	}
 }
 
@@ -128,11 +131,18 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 }
 
 func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(streamId string, eventName string, eventProperties []Property) EventSchemaBody {
+	var props interface{}
+	if shouldEncrypt(avo.envName, avo.publicEncryptionKey) {
+		props = encryptEventProperties(eventProperties, avo.publicEncryptionKey)
+	} else {
+		props = eventProperties
+	}
+
 	eventSchemaBody := EventSchemaBody{
 		BaseBody:        avo.createBaseCallBody(streamId),
 		Type:            "event",
 		EventName:       eventName,
-		EventProperties: eventProperties,
+		EventProperties: props,
 	}
 
 	return eventSchemaBody
@@ -140,15 +150,16 @@ func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(streamId string, event
 
 func (avo *AvoNetworkCallsHandler) createBaseCallBody(streamId string) BaseBody {
 	return BaseBody{
-		ApiKey:       avo.apiKey,
-		AppName:      avo.appName,
-		AppVersion:   avo.appVersion,
-		LibVersion:   avo.libVersion,
-		Env:          avo.envName,
-		LibPlatform:  "go",
-		MessageId:    newGuid(),
-		AnonymousId:  streamId,
-		CreatedAt:    time.Now().Format(time.RFC3339),
-		SamplingRate: avo.samplingRate,
+		ApiKey:              avo.apiKey,
+		AppName:             avo.appName,
+		AppVersion:          avo.appVersion,
+		LibVersion:          avo.libVersion,
+		Env:                 avo.envName,
+		LibPlatform:         "go",
+		MessageId:           newGuid(),
+		AnonymousId:         streamId,
+		CreatedAt:           time.Now().Format(time.RFC3339),
+		SamplingRate:        avo.samplingRate,
+		PublicEncryptionKey: avo.publicEncryptionKey,
 	}
 }
