@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"testing"
 )
 
@@ -65,10 +66,10 @@ func TestShouldEncrypt_ProdEmptyKey(t *testing.T) {
 
 func TestEncryptPropertyValue_WireFormat(t *testing.T) {
 	priv, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
 	plaintext := "hello world"
-	cipherB64, err := encryptPropertyValue(plaintext, pubKeyBase64)
+	cipherB64, err := encryptPropertyValue(plaintext, pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption failed: %v", err)
 	}
@@ -105,9 +106,9 @@ func TestEncryptPropertyValue_WireFormat(t *testing.T) {
 
 func TestEncryptPropertyValue_EmptyString(t *testing.T) {
 	priv, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
-	cipherB64, err := encryptPropertyValue("", pubKeyBase64)
+	cipherB64, err := encryptPropertyValue("", pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption failed: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestEncryptPropertyValue_EmptyString(t *testing.T) {
 }
 
 func TestEncryptPropertyValue_InvalidPublicKey(t *testing.T) {
-	_, err := encryptPropertyValue("test", "not-valid-base64-key!!")
+	_, err := encryptPropertyValue("test", "not-valid-hex-key!!")
 	if err == nil {
 		t.Error("expected error for invalid public key")
 	}
@@ -131,10 +132,10 @@ func TestEncryptPropertyValue_InvalidPublicKey(t *testing.T) {
 // AC2: Standard 12-byte GCM FAILS interop decryption
 func TestStandard12ByteGCM_FailsInterop(t *testing.T) {
 	priv, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
 	// Encrypt with the correct 16-byte nonce implementation
-	cipherB64, err := encryptPropertyValue("test data", pubKeyBase64)
+	cipherB64, err := encryptPropertyValue("test data", pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption failed: %v", err)
 	}
@@ -149,9 +150,9 @@ func TestStandard12ByteGCM_FailsInterop(t *testing.T) {
 // AC8: Cross-SDK interop structure test
 func TestCrossSDK_WireFormatStructure(t *testing.T) {
 	_, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
-	cipherB64, err := encryptPropertyValue("cross-sdk test value", pubKeyBase64)
+	cipherB64, err := encryptPropertyValue("cross-sdk test value", pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption failed: %v", err)
 	}
@@ -188,13 +189,13 @@ func TestCrossSDK_WireFormatStructure(t *testing.T) {
 // Multiple encryptions of same plaintext produce different ciphertexts (randomness)
 func TestEncryptPropertyValue_NonDeterministic(t *testing.T) {
 	_, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
-	c1, err := encryptPropertyValue("same", pubKeyBase64)
+	c1, err := encryptPropertyValue("same", pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption 1 failed: %v", err)
 	}
-	c2, err := encryptPropertyValue("same", pubKeyBase64)
+	c2, err := encryptPropertyValue("same", pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption 2 failed: %v", err)
 	}
@@ -206,14 +207,14 @@ func TestEncryptPropertyValue_NonDeterministic(t *testing.T) {
 // Test long plaintext
 func TestEncryptPropertyValue_LongValue(t *testing.T) {
 	priv, pub := generateTestKeyPair(t)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(uncompressedPublicKeyBytes(pub))
+	pubKeyHex := hex.EncodeToString(uncompressedPublicKeyBytes(pub))
 
 	longStr := ""
 	for i := 0; i < 1000; i++ {
 		longStr += "a"
 	}
 
-	cipherB64, err := encryptPropertyValue(longStr, pubKeyBase64)
+	cipherB64, err := encryptPropertyValue(longStr, pubKeyHex)
 	if err != nil {
 		t.Fatalf("encryption failed: %v", err)
 	}

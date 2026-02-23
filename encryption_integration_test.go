@@ -3,7 +3,7 @@ package avoinspector
 import (
 	"crypto/ecdh"
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 )
@@ -80,7 +80,7 @@ func TestEncryptEventProperties_ListTypeOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+	pubKeyHex := hex.EncodeToString(priv.PublicKey().Bytes())
 
 	properties := []Property{
 		{PropertyName: "name", PropertyType: "string"},
@@ -88,7 +88,7 @@ func TestEncryptEventProperties_ListTypeOmitted(t *testing.T) {
 		{PropertyName: "count", PropertyType: "int"},
 	}
 
-	encrypted := encryptEventProperties(properties, pubKeyBase64)
+	encrypted := encryptEventProperties(properties, pubKeyHex)
 
 	// Should have 2 properties (list omitted)
 	if len(encrypted) != 2 {
@@ -124,7 +124,7 @@ func TestProdPayload_NoEncryptedPropertyValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+	pubKeyHex := hex.EncodeToString(priv.PublicKey().Bytes())
 
 	handler := &AvoNetworkCallsHandler{
 		apiKey:              "test-api-key",
@@ -134,7 +134,7 @@ func TestProdPayload_NoEncryptedPropertyValue(t *testing.T) {
 		libVersion:          "1.0.0",
 		samplingRate:        1.0,
 		shouldLog:           false,
-		publicEncryptionKey: pubKeyBase64,
+		publicEncryptionKey: pubKeyHex,
 	}
 
 	newGuid = func() string { return "test-message-id" }
@@ -162,7 +162,7 @@ func TestDevPayload_HasEncryptedPropertyValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes())
+	pubKeyHex := hex.EncodeToString(priv.PublicKey().Bytes())
 
 	handler := &AvoNetworkCallsHandler{
 		apiKey:              "test-api-key",
@@ -172,7 +172,7 @@ func TestDevPayload_HasEncryptedPropertyValue(t *testing.T) {
 		libVersion:          "1.0.0",
 		samplingRate:        1.0,
 		shouldLog:           false,
-		publicEncryptionKey: pubKeyBase64,
+		publicEncryptionKey: pubKeyHex,
 	}
 
 	newGuid = func() string { return "test-message-id" }

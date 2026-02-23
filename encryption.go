@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -26,9 +27,9 @@ func shouldEncrypt(env string, publicEncryptionKey string) bool {
 //
 // Wire format: [0x00][65-byte uncompressed ephemeral pubkey][16-byte IV][16-byte auth tag][ciphertext]
 // Output: base64-encoded wire bytes.
-func encryptPropertyValue(plaintext string, publicKeyBase64 string) (string, error) {
+func encryptPropertyValue(plaintext string, publicKeyHex string) (string, error) {
 	// Decode the recipient's public key
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	pubKeyBytes, err := hex.DecodeString(publicKeyHex)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode public key: %w", err)
 	}
@@ -102,7 +103,7 @@ type EncryptedProperty struct {
 // encryptEventProperties encrypts non-list property types and returns EncryptedProperty items.
 // List-type properties are omitted entirely (AC5).
 // On encryption failure, the property is omitted and a warning is logged (AC6).
-func encryptEventProperties(properties []Property, publicKeyBase64 string) []EncryptedProperty {
+func encryptEventProperties(properties []Property, publicKeyHex string) []EncryptedProperty {
 	var result []EncryptedProperty
 
 	for _, prop := range properties {
@@ -111,7 +112,7 @@ func encryptEventProperties(properties []Property, publicKeyBase64 string) []Enc
 			continue
 		}
 
-		encrypted, err := encryptPropertyValue(prop.PropertyType, publicKeyBase64)
+		encrypted, err := encryptPropertyValue(prop.PropertyType, publicKeyHex)
 		if err != nil {
 			// AC6: log warning, omit property, continue
 			log.Printf("[Avo Inspector] Warning: failed to encrypt property '%s': %v", prop.PropertyName, err)
