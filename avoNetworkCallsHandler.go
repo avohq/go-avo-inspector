@@ -12,55 +12,54 @@ import (
 )
 
 type BaseBody struct {
-	ApiKey       string  `json:"apiKey"`
-	AppName      string  `json:"appName"`
-	AppVersion   string  `json:"appVersion"`
-	LibVersion   string  `json:"libVersion"`
-	Env          string  `json:"env"`
-	LibPlatform  string  `json:"libPlatform"`
-	MessageId    string  `json:"messageId"`
-	TrackingId   string  `json:"trackingId"`
-	CreatedAt    string  `json:"createdAt"`
-	SessionId    string  `json:"sessionId"`
-	SamplingRate float64 `json:"samplingRate"`
-}
-
-type SessionStartedBody struct {
-	BaseBody
-	Type string `json:"type"`
+	ApiKey              string  `json:"apiKey"`
+	AppName             string  `json:"appName"`
+	AppVersion          string  `json:"appVersion"`
+	LibVersion          string  `json:"libVersion"`
+	Env                 string  `json:"env"`
+	LibPlatform         string  `json:"libPlatform"`
+	MessageId           string  `json:"messageId"`
+	AnonymousId         string  `json:"anonymousId"`
+	CreatedAt           string  `json:"createdAt"`
+	SamplingRate        float64 `json:"samplingRate"`
+	PublicEncryptionKey string  `json:"publicEncryptionKey,omitempty"`
 }
 
 type EventSchemaBody struct {
 	BaseBody
-	Type            string     `json:"type"`
-	EventName       string     `json:"eventName"`
-	EventProperties []Property `json:"eventProperties"`
-	AvoFunction     bool       `json:"avoFunction"`
-	EventId         string     `json:"eventId"`
-	EventHash       string     `json:"eventHash"`
+	Type            string      `json:"type"`
+	EventName       string      `json:"eventName"`
+	EventProperties interface{} `json:"eventProperties"`
+	AvoFunction     bool        `json:"avoFunction"`
+	EventId         string      `json:"eventId"`
+	EventHash       string      `json:"eventHash"`
 }
 
 type AvoNetworkCallsHandler struct {
-	apiKey       string
-	envName      string
-	appName      string
-	appVersion   string
-	libVersion   string
-	samplingRate float64
-	shouldLog    bool
+	apiKey              string
+	envName             string
+	appName             string
+	appVersion          string
+	libVersion          string
+	samplingRate        float64
+	shouldLog           bool
+	trackingEndpoint    string
+	publicEncryptionKey string
 }
 
-const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
+const defaultTrackingEndpoint = "https://api.avo.app/inspector/v1/track"
 
-func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
+func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool, publicEncryptionKey string) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
-		apiKey:       apiKey,
-		envName:      envName,
-		appName:      appName,
-		appVersion:   appVersion,
-		libVersion:   libVersion,
-		samplingRate: 1.0,
-		shouldLog:    shouldLog,
+		apiKey:              apiKey,
+		envName:             envName,
+		appName:             appName,
+		appVersion:          appVersion,
+		libVersion:          libVersion,
+		samplingRate:        1.0,
+		shouldLog:           shouldLog,
+		trackingEndpoint:    defaultTrackingEndpoint,
+		publicEncryptionKey: publicEncryptionKey,
 	}
 }
 
@@ -84,8 +83,6 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	if h.shouldLog {
 		for _, event := range events {
 			switch e := event.(type) {
-			case SessionStartedBody:
-				log.Println("Avo Inspector: sending session started event.")
 			case EventSchemaBody:
 				eventSchemaBody := e
 				log.Printf("Avo Inspector: sending event %s with schema %v\n", eventSchemaBody.EventName, eventSchemaBody.EventProperties)
@@ -94,7 +91,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	}
 
 	client := http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, trackingEndpoint, bytes.NewReader(eventsPayload))
+	req, err := http.NewRequest(http.MethodPost, h.trackingEndpoint, bytes.NewReader(eventsPayload))
 	if err != nil {
 		return fmt.Errorf("could not create request: %v", err)
 	}
@@ -133,37 +130,36 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 	return nil
 }
 
-func (avo *AvoNetworkCallsHandler) bodyForSessionStartedCall(sessionId string) SessionStartedBody {
-	sessionBody := SessionStartedBody{
-		BaseBody: avo.createBaseCallBody(sessionId),
-		Type:     "sessionStarted",
+func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(streamId string, eventName string, eventProperties []Property) EventSchemaBody {
+	var props interface{}
+	if shouldEncrypt(avo.envName, avo.publicEncryptionKey) {
+		props = encryptEventProperties(eventProperties, avo.publicEncryptionKey)
+	} else {
+		props = eventProperties
 	}
-	return sessionBody
-}
 
-func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(sessionId string, eventName string, eventProperties []Property) EventSchemaBody {
 	eventSchemaBody := EventSchemaBody{
-		BaseBody:        avo.createBaseCallBody(sessionId),
+		BaseBody:        avo.createBaseCallBody(streamId),
 		Type:            "event",
 		EventName:       eventName,
-		EventProperties: eventProperties,
+		EventProperties: props,
 	}
 
 	return eventSchemaBody
 }
 
-func (avo *AvoNetworkCallsHandler) createBaseCallBody(sessionId string) BaseBody {
+func (avo *AvoNetworkCallsHandler) createBaseCallBody(streamId string) BaseBody {
 	return BaseBody{
-		ApiKey:       avo.apiKey,
-		AppName:      avo.appName,
-		AppVersion:   avo.appVersion,
-		LibVersion:   avo.libVersion,
-		Env:          avo.envName,
-		LibPlatform:  "go",
-		MessageId:    newGuid(),
-		TrackingId:   "",
-		CreatedAt:    time.Now().Format(time.RFC3339),
-		SessionId:    sessionId,
-		SamplingRate: avo.samplingRate,
+		ApiKey:              avo.apiKey,
+		AppName:             avo.appName,
+		AppVersion:          avo.appVersion,
+		LibVersion:          avo.libVersion,
+		Env:                 avo.envName,
+		LibPlatform:         "go",
+		MessageId:           newGuid(),
+		AnonymousId:         streamId,
+		CreatedAt:           time.Now().Format(time.RFC3339),
+		SamplingRate:        avo.samplingRate,
+		PublicEncryptionKey: avo.publicEncryptionKey,
 	}
 }
