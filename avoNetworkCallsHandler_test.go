@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -221,5 +223,32 @@ func TestWire_RequestTimeout(t *testing.T) {
 	result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 	if result.status != sendFailed || !errors.Is(result.err, errRequestTimeout) {
 		t.Errorf("expected %q, got %v", errRequestTimeout, result.err)
+	}
+}
+
+// A redirect is never followed: it would carry the api-key header to another host. The 3xx is
+// handled as an ordinary non-200.
+func TestWire_RedirectIsNotFollowed(t *testing.T) {
+	var leaked []string
+	var mu sync.Mutex
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, r.Header.Get("api-key"))
+		mu.Unlock()
+	}))
+	defer other.Close()
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		newTestServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, other.URL, status)
+		})
+		result := newAvoNetworkCallsHandler("secret-key", Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		if result.status != sendNon200 {
+			t.Errorf("%d: expected a non-200 result, got %v (%v)", status, result.status, result.err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(leaked) != 0 {
+		t.Errorf("the redirect was followed and sent api-key %q to another host", leaked)
 	}
 }

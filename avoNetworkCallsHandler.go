@@ -116,7 +116,12 @@ func newAvoNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *AvoNetworkCa
 	return &AvoNetworkCallsHandler{
 		apiKey: apiKey,
 		env:    env,
-		client: &http.Client{Timeout: requestTimeout},
+		client: &http.Client{
+			Timeout: requestTimeout,
+			// Never follow a redirect: it would carry the api-key header to another host. The
+			// 3xx is returned as is and handled as a non-200.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
