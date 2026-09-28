@@ -284,7 +284,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 
 	event := inspector.newWireEvent(eventName, streamId, samplingRate, schema, options)
 
-	var batch []wireEvent
+	var send *inFlightSend
 	dropped := 0
 	inspector.mu.Lock()
 	if inspector.destroyed {
@@ -297,7 +297,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		dropped++
 	}
 	if len(inspector.pending) >= inspector.batchSize {
-		batch = inspector.takePending()
+		send = inspector.takeBatch()
 	} else {
 		inspector.armFlushTimer()
 	}
@@ -306,10 +306,13 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	if dropped > 0 {
 		logIfEnabled("maxQueueSize exceeded; dropped %d oldest event(s).", dropped)
 	}
-	if batch == nil {
+	if send == nil {
 		return schema, nil
 	}
-	result := inspector.dispatch(batch)
+	if testHookBeforeSend != nil {
+		testHookBeforeSend()
+	}
+	result := inspector.startSend(send)
 	if inspector.batchSize == 1 {
 		// Immediate-send mode: the outcome of this call's own send is observable (SPEC.md §7.5).
 		if res, ok := <-result; ok && res.status == sendNon200 {
@@ -349,32 +352,47 @@ func (inspector *AvoInspector) newWireEvent(eventName, streamId string, sampling
 	}
 }
 
-// dispatch sends batch in a new goroutine, outside the lock, and tracks it so Flush can wait for
-// it. The returned channel yields the result once, or is closed without a value if the instance
-// was destroyed first.
-func (inspector *AvoInspector) dispatch(batch []wireEvent) <-chan sendResult {
-	result := make(chan sendResult, 1)
-	inspector.mu.Lock()
-	if inspector.destroyed {
-		inspector.mu.Unlock()
-		close(result)
-		return result
-	}
-	id := inspector.nextSendID
-	inspector.nextSendID++
-	done := make(chan struct{})
-	inspector.inFlight[id] = done
-	ctx := inspector.ctx
-	inspector.mu.Unlock()
+// inFlightSend is a batch that has left the buffer and is registered as in flight, so Flush waits
+// for it from that moment on, even before its send starts.
+type inFlightSend struct {
+	id    uint64
+	done  chan struct{}
+	batch []wireEvent
+	ctx   context.Context
+}
 
+// takeBatch swaps out the pending batch and registers it as in flight in the same critical
+// section, so a concurrent Flush can never miss a batch between the two. It returns nil when the
+// buffer is empty. Call it with mu held.
+func (inspector *AvoInspector) takeBatch() *inFlightSend {
+	batch := inspector.takePending()
+	if len(batch) == 0 {
+		return nil
+	}
+	return inspector.registerSend(batch)
+}
+
+// registerSend records batch as in flight. Call it with mu held.
+func (inspector *AvoInspector) registerSend(batch []wireEvent) *inFlightSend {
+	send := &inFlightSend{id: inspector.nextSendID, done: make(chan struct{}), batch: batch, ctx: inspector.ctx}
+	inspector.nextSendID++
+	inspector.inFlight[send.id] = send.done
+	return send
+}
+
+// startSend sends a registered batch in a new goroutine, outside the lock. The returned channel
+// yields the result once.
+func (inspector *AvoInspector) startSend(send *inFlightSend) <-chan sendResult {
+	result := make(chan sendResult, 1)
+	batch := send.batch
 	go func() {
-		defer close(done)
-		res := inspector.avoNetworkCallsHandler.send(ctx, batch)
+		defer close(send.done)
+		res := inspector.avoNetworkCallsHandler.send(send.ctx, batch)
 		inspector.mu.Lock()
 		if res.status == sendOk && res.samplingRate != nil {
 			inspector.samplingRate = *res.samplingRate
 		}
-		delete(inspector.inFlight, id)
+		delete(inspector.inFlight, send.id)
 		inspector.mu.Unlock()
 		// SPEC.md §7.5, §12.5: a failed batch is logged and dropped, never re-queued or retried.
 		switch res.status {
@@ -406,19 +424,16 @@ func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 		inspector.mu.Unlock()
 		return nil
 	}
-	batch := inspector.takePending()
-	inspector.mu.Unlock()
-
-	if len(batch) > 0 {
-		inspector.dispatch(batch)
-	}
-
-	inspector.mu.Lock()
+	send := inspector.takeBatch()
 	waiting := make([]chan struct{}, 0, len(inspector.inFlight))
 	for _, done := range inspector.inFlight {
 		waiting = append(waiting, done)
 	}
 	inspector.mu.Unlock()
+
+	if send != nil {
+		inspector.startSend(send)
+	}
 
 	deadline := time.Now().Add(timeout)
 	for _, done := range waiting {
@@ -491,10 +506,10 @@ func (inspector *AvoInspector) onFlushTimer(generation uint64) {
 		inspector.mu.Unlock()
 		return
 	}
-	batch := inspector.takePending()
+	send := inspector.takeBatch()
 	inspector.mu.Unlock()
-	if len(batch) > 0 {
-		inspector.dispatch(batch)
+	if send != nil {
+		inspector.startSend(send)
 	}
 }
 
@@ -505,6 +520,10 @@ func (inspector *AvoInspector) setSamplingRate(rate float64) {
 	inspector.samplingRate = rate
 	inspector.mu.Unlock()
 }
+
+// testHookBeforeSend, when set by a test, runs after a size-triggered batch has left the buffer
+// and before its send starts. It is always nil outside tests.
+var testHookBeforeSend func()
 
 // logOutput receives every log line; tests swap it under logMu.
 var (

@@ -188,7 +188,10 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			inspector.setSamplingRate(0.5)
 			// Send directly, bypassing the per-event sampling decision.
 			event := inspector.newWireEvent("E", "", 0.5, []Property{}, TrackOptions{})
-			<-inspector.dispatch([]wireEvent{event})
+			inspector.mu.Lock()
+			send := inspector.registerSend([]wireEvent{event})
+			inspector.mu.Unlock()
+			<-inspector.startSend(send)
 			inspector.mu.Lock()
 			rate := inspector.samplingRate
 			inspector.mu.Unlock()
@@ -605,5 +608,27 @@ func TestBatchTimer_ArmedOnlyWhilePending(t *testing.T) {
 	}
 	if n := len(server.captured()); n != 2 {
 		t.Errorf("expected 2 requests, got %d", n)
+	}
+}
+
+// A batch that has left the buffer but whose send has not started yet must already count as in
+// flight: Flush called in that window has to wait for it.
+func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 1, DisableBatchTimer: true})
+	flushed := make(chan int, 1)
+	testHookBeforeSend = func() {
+		testHookBeforeSend = nil
+		go func() {
+			_ = inspector.Flush(5 * time.Second)
+			flushed <- len(server.captured())
+		}()
+		// Hold the window open long enough for that Flush to run inside it.
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Cleanup(func() { testHookBeforeSend = nil })
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	if n := <-flushed; n != 1 {
+		t.Errorf("Flush returned before the taken batch was sent: %d requests captured", n)
 	}
 }
