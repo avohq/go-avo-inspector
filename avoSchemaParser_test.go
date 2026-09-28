@@ -322,3 +322,40 @@ func TestExtractSchema_SubSliceIsNotACycle(t *testing.T) {
 	assertSchemaJSON(t, extractSchema(om{{"v", s}}),
 		`[{"propertyName":"v","propertyType":"list(string)","children":["string",["string"]]}]`)
 }
+
+// The wire JSON of a schema decodes back into the same []Property.
+func TestProperty_JSONRoundTrip(t *testing.T) {
+	testCases := map[string]interface{}{
+		"objects":        om{{"user", om{{"name", "a"}, {"address", om{{"zip", 1}}}}}, {"empty", om{}}, {"n", nil}},
+		"lists of lists": om{{"v", list{list{1, list{"x"}}, list{2.5}, "s"}}, {"empty", list{}}},
+		"list of object": om{{"v", list{om{{"a", 1}}, om{{"b", list{true}}}}}},
+		"fixture-9":      om{{"prop7", list{"a", "list", om{{"obj in list", true}, {"int field", 1}}, list{"another", "list"}, list{1, 2}}}},
+		"depth cut": om{{"deep", func() interface{} {
+			var v interface{} = 1
+			for i := 0; i < 12; i++ {
+				v = om{{"n", v}}
+			}
+			return v
+		}()}},
+	}
+	for name, input := range testCases {
+		t.Run(name, func(t *testing.T) {
+			schema := extractSchema(input)
+			encoded, err := json.Marshal(schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded []Property
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatalf("decode %s: %v", encoded, err)
+			}
+			if !reflect.DeepEqual(decoded, schema) {
+				t.Errorf("round trip changed the schema\n got: %#v\nwant: %#v", decoded, schema)
+			}
+			reencoded, _ := json.Marshal(decoded)
+			if string(reencoded) != string(encoded) {
+				t.Errorf("re-encoding differs\n got: %s\nwant: %s", reencoded, encoded)
+			}
+		})
+	}
+}

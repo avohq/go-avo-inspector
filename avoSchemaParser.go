@@ -1,7 +1,9 @@
 package avoinspector
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -56,6 +58,80 @@ func (p Property) MarshalJSON() ([]byte, error) {
 	default:
 		return json.Marshal(scalar{p.PropertyName, p.PropertyType})
 	}
+}
+
+// UnmarshalJSON is the inverse of MarshalJSON: "children" goes to Children for an "object"
+// property and to ListChildren for a list property. Inside ListChildren, an array of schema
+// entries decodes as []Property and any other array as []interface{}; an empty array, which the
+// JSON does not tell apart, decodes as an empty []interface{}.
+func (p *Property) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		PropertyName string          `json:"propertyName"`
+		PropertyType string          `json:"propertyType"`
+		Children     json.RawMessage `json:"children"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = Property{PropertyName: raw.PropertyName, PropertyType: raw.PropertyType}
+	if len(raw.Children) == 0 || string(raw.Children) == "null" {
+		return nil
+	}
+	if strings.HasPrefix(raw.PropertyType, "list(") {
+		children, err := decodeListChildren(raw.Children)
+		p.ListChildren = children
+		return err
+	}
+	p.Children = []Property{}
+	return json.Unmarshal(raw.Children, &p.Children)
+}
+
+// decodeListChildren decodes the "children" array of a list property (SPEC.md §7.3.4).
+func decodeListChildren(data json.RawMessage) ([]interface{}, error) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, err
+	}
+	result := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		switch firstJSONByte(item) {
+		case '"':
+			var typeName string
+			if err := json.Unmarshal(item, &typeName); err != nil {
+				return nil, err
+			}
+			result = append(result, typeName)
+		case '[':
+			var elements []json.RawMessage
+			if err := json.Unmarshal(item, &elements); err != nil {
+				return nil, err
+			}
+			if len(elements) > 0 && firstJSONByte(elements[0]) == '{' {
+				entries := []Property{}
+				if err := json.Unmarshal(item, &entries); err != nil {
+					return nil, err
+				}
+				result = append(result, entries)
+				continue
+			}
+			nested, err := decodeListChildren(item)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, nested)
+		default:
+			return nil, fmt.Errorf("avoinspector: unexpected list child %s", item)
+		}
+	}
+	return result, nil
+}
+
+func firstJSONByte(data []byte) byte {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) == 0 {
+		return 0
+	}
+	return trimmed[0]
 }
 
 // KeyValue is one entry of an OrderedMap.
