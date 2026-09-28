@@ -691,10 +691,10 @@ func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
 	}
 }
 
-// net/http refuses every control character in a header value except tab, so the constructor
-// rejects all of them with the spec's message, and the send-time guard refuses them too.
+// Every Unicode control character (Cc: C0, DEL and C1) except tab is rejected by the constructor
+// with the spec's message, and refused by the send-time guard.
 func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
-	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey"} {
+	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey", "key\u0080", "key\u0085", "key\u009f"} {
 		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
 		if err == nil || err.Error() != apiKeyControlMessage || inspector != nil {
 			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyControlMessage, inspector, err)
@@ -704,9 +704,10 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}
 	}
-	inspector := mustInspector(t, Options{ApiKey: "key\twith-tab"})
-	if inspector.apiKey != "key\twith-tab" {
-		t.Errorf("a tab is a valid header character and must be kept")
+	for _, apiKey := range []string{"key\twith-tab", "key\u00a0nbsp", "clé"} {
+		if inspector := mustInspector(t, Options{ApiKey: apiKey}); inspector.apiKey != apiKey {
+			t.Errorf("apiKey %q is not a control character and must be kept", apiKey)
+		}
 	}
 }
 

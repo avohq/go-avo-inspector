@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"unicode"
 )
 
 // BaseBody is the pre-3.0 wire body.
@@ -131,11 +132,11 @@ func (h *AvoNetworkCallsHandler) endpoint() string {
 }
 
 // isSafeHeaderValue reports whether value can be sent as a header value. SPEC.md §7.2 requires
-// refusing CR, LF and NUL; net/http also refuses every other control character except tab, so
-// those are refused here too, with the same outcome.
+// refusing CR, LF and NUL; every other Unicode control character (C0, DEL and C1) except tab is
+// refused too, the same set the Node and Java SDKs refuse.
 func isSafeHeaderValue(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if c := value[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+	for _, r := range value {
+		if unicode.IsControl(r) && r != '\t' {
 			return false
 		}
 	}
