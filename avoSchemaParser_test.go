@@ -251,6 +251,25 @@ func TestExtractSchema_SelfReferenceUnderManyKeysIsFast(t *testing.T) {
 	}
 }
 
+// The shared cross-SDK reference inputs for the depth rule: top-level properties are at depth 0,
+// each descent into a property value or a list element adds 1, and at depth 10 a complex property
+// becomes "object" with no children and a complex list element the type string "object".
+func TestExtractSchema_DepthReferenceInputs(t *testing.T) {
+	testCases := []struct{ input, expected string }{
+		{`{"a":[[[[[[[[[[[1]]]]]]]]]]]}`,
+			`[{"propertyName":"a","propertyType":"list(object)","children":[[[[[[[[[["object"]]]]]]]]]]}]`},
+		{`{"a":[{"b":[{"c":[{"d":[{"e":[{"f":[{"g":1}]}]}]}]}]}]}`,
+			`[{"propertyName":"a","propertyType":"list(object)","children":[[{"propertyName":"b","propertyType":"list(object)","children":[[{"propertyName":"c","propertyType":"list(object)","children":[[{"propertyName":"d","propertyType":"list(object)","children":[[{"propertyName":"e","propertyType":"list(object)","children":[[{"propertyName":"f","propertyType":"object","children":[]}]]}]]}]]}]]}]]}]`},
+	}
+	for _, tc := range testCases {
+		var input map[string]interface{}
+		if err := json.Unmarshal([]byte(tc.input), &input); err != nil {
+			t.Fatal(err)
+		}
+		assertSchemaJSON(t, extractSchema(input), tc.expected)
+	}
+}
+
 // Depth counts one level per container, object or list, as in C# and Node: a list of objects
 // costs two levels. The expected values are the C# and Node output for the same inputs.
 func TestExtractSchema_DepthMatchesReferenceSDKs(t *testing.T) {
