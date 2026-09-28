@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type om = OrderedMap
@@ -204,5 +205,48 @@ func TestExtractSchema_MaterializesEachValueOnce(t *testing.T) {
 		if allocs := testing.AllocsPerRun(20, func() { extractSchema(tc.input) }); allocs > tc.limit {
 			t.Errorf("%s: %v allocations, want at most %v", tc.name, allocs, tc.limit)
 		}
+	}
+}
+
+// A map, slice or OrderedMap that is its own ancestor is cut like a value past the depth cap: an
+// "object" property with no children, or the type string "object" inside a list.
+func TestExtractSchema_CutsCyclesByAncestorIdentity(t *testing.T) {
+	selfMap := map[string]interface{}{"n": 1}
+	selfMap["self"] = selfMap
+	assertSchemaJSON(t, extractSchema(selfMap),
+		`[{"propertyName":"n","propertyType":"int"},{"propertyName":"self","propertyType":"object","children":[]}]`)
+
+	selfList := []interface{}{nil}
+	selfList[0] = selfList
+	assertSchemaJSON(t, extractSchema(om{{"list", selfList}}),
+		`[{"propertyName":"list","propertyType":"list(object)","children":["object"]}]`)
+
+	ordered := om{{"x", nil}}
+	ordered[0].Value = ordered
+	assertSchemaJSON(t, extractSchema(ordered),
+		`[{"propertyName":"x","propertyType":"object","children":[]}]`)
+
+	// A value shared by siblings is not a cycle and is expanded each time.
+	shared := map[string]interface{}{"a": 1}
+	assertSchemaJSON(t, extractSchema(om{{"x", shared}, {"y", list{shared}}}),
+		`[{"propertyName":"x","propertyType":"object","children":[{"propertyName":"a","propertyType":"int"}]},`+
+			`{"propertyName":"y","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"}]]}]`)
+}
+
+// A map holding itself under many keys would otherwise expand to keys^depth entries.
+func TestExtractSchema_SelfReferenceUnderManyKeysIsFast(t *testing.T) {
+	wide := map[string]interface{}{}
+	for i := 0; i < 20; i++ {
+		wide[fmt.Sprint(i)] = wide
+	}
+	done := make(chan []Property, 1)
+	go func() { done <- extractSchema(wide) }()
+	select {
+	case schema := <-done:
+		if len(schema) != 20 || len(schema[0].Children) != 0 {
+			t.Errorf("expected 20 cut properties, got %d with %d children", len(schema), len(schema[0].Children))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("extracting a self-referencing map did not finish")
 	}
 }
