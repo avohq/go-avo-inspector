@@ -692,17 +692,24 @@ func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
 }
 
 // Every Unicode control character (Cc: C0, DEL and C1) except tab is rejected by the constructor
-// with the spec's message, and refused by the send-time guard.
+// and refused by the send-time guard. CR, LF and NUL get the spec's message, the others their own.
 func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey", "key\u0080", "key\u0085", "key\u009f"} {
 		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
-		if err == nil || err.Error() != apiKeyControlMessage || inspector != nil {
-			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyControlMessage, inspector, err)
+		if err == nil || err.Error() != apiKeyOtherControlMessage || inspector != nil {
+			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyOtherControlMessage, inspector, err)
 		}
 		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
+		}
+	}
+	// CR, LF and NUL keep the spec's exact message, even alongside another control character.
+	for _, apiKey := range []string{"key\r", "key\n", "key\x00", "key\x01\n"} {
+		_, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
+		if err == nil || err.Error() != apiKeyControlMessage {
+			t.Errorf("apiKey %q: expected the spec message, got %v", apiKey, err)
 		}
 	}
 	if n := len(server.captured()); n != 0 {
