@@ -7,9 +7,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 )
+
+// TestMain points the mock endpoint at a closed local port, so a test that forgets to start a
+// test server can never reach the real Inspector API. Tests that need a server override it.
+func TestMain(m *testing.M) {
+	os.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	os.Exit(m.Run())
+}
 
 type capturedRequest struct {
 	header  http.Header

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
@@ -32,6 +33,7 @@ const (
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
 	apiKeyControlMessage = "[Avo Inspector] API key contains a control character. The API key is sent as a request header and cannot contain CR, LF, or NUL."
+	apiKeyUTF8Message    = "Avo Inspector: apiKey must be valid UTF-8"
 	noVersionMessage     = "[Avo Inspector] No version provided. Many features of Inspector rely on versioning. Please provide comparable string version, i.e. integer or semantic."
 	internalErrorMessage = "Avo Inspector: something went wrong. Please report to support@avo.app."
 	logPrefix            = "[Avo Inspector] "
@@ -134,10 +136,14 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appN
 }
 
 // NewAvoInspectorWithOptions creates an inspector. It returns an error if ApiKey or AppVersion is
-// empty or whitespace, or if ApiKey contains a control character other than tab.
+// empty or whitespace, or if ApiKey is not valid UTF-8 or contains a control character other
+// than tab.
 func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 	if strings.TrimSpace(options.ApiKey) == "" {
 		return nil, errors.New(noApiKeyMessage)
+	}
+	if !utf8.ValidString(options.ApiKey) {
+		return nil, errors.New(apiKeyUTF8Message)
 	}
 	if !isSafeHeaderValue(options.ApiKey) {
 		return nil, errors.New(apiKeyControlMessage)

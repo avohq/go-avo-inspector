@@ -694,6 +694,7 @@ func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
 // Every Unicode control character (Cc: C0, DEL and C1) except tab is rejected by the constructor
 // with the spec's message, and refused by the send-time guard.
 func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
+	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey", "key\u0080", "key\u0085", "key\u009f"} {
 		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
 		if err == nil || err.Error() != apiKeyControlMessage || inspector != nil {
@@ -703,6 +704,9 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}
+	}
+	if n := len(server.captured()); n != 0 {
+		t.Fatalf("a control character reached the wire: %d requests", n)
 	}
 	for _, apiKey := range []string{"key\twith-tab", "key\u00a0nbsp", "clé"} {
 		if inspector := mustInspector(t, Options{ApiKey: apiKey}); inspector.apiKey != apiKey {
@@ -738,5 +742,29 @@ func TestDestroy_AbandonedSendIsNotLogged(t *testing.T) {
 	}
 	if output := logs(); output != "" {
 		t.Errorf("expected no log for an abandoned send, got %q", output)
+	}
+}
+
+// An apiKey that is not valid UTF-8 is rejected at construction and refused at send. Valid
+// multibyte characters, whose continuation bytes fall in 0x80-0xBF, are accepted.
+func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
+	server := newTestServer(t, nil)
+	for _, apiKey := range []string{"key\x85", "key\xff", "\xc4"} {
+		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
+		if err == nil || err.Error() != apiKeyUTF8Message || inspector != nil {
+			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyUTF8Message, inspector, err)
+		}
+		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		if !errors.Is(result.err, errUnsafeHeader) {
+			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
+		}
+	}
+	if n := len(server.captured()); n != 0 {
+		t.Fatalf("an invalid apiKey reached the wire: %d requests", n)
+	}
+	inspector := mustInspector(t, Options{ApiKey: "klucz-ą", Env: Dev})
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if requests := server.captured(); len(requests) != 1 || requests[0].header.Get("api-key") != "klucz-ą" {
+		t.Errorf("a valid multibyte apiKey must be accepted and sent, got %d requests", len(requests))
 	}
 }

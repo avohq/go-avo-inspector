@@ -72,8 +72,8 @@ avoInspector, err := avoinspector.NewAvoInspector(
 ```
 
 `NewAvoInspector` returns an error if the API key or the app version is empty or whitespace, or if
-the API key contains a control character other than tab (such as a carriage return, line feed or
-NUL). An empty or unknown environment falls back to `Dev` with a warning.
+the API key is not valid UTF-8 or contains a control character other than tab (such as a carriage
+return, line feed or NUL). An empty or unknown environment falls back to `Dev` with a warning.
 
 To configure batching, use `NewAvoInspectorWithOptions`:
 
