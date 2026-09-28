@@ -270,21 +270,20 @@ func listElements(value interface{}) ([]interface{}, bool) {
 	return elements, true
 }
 
-// removeDuplicates keeps the first occurrence of each mapped list element, comparing type strings
-// by value and nested schemas structurally (SPEC.md §9.3.3).
+// removeDuplicates keeps the first occurrence of each type string. An element that is an object
+// or a list is never a duplicate: each keeps its own entry, as in the reference parser, which
+// compares those by identity (SPEC.md §9.3.3).
 func removeDuplicates(items []interface{}) []interface{} {
 	result := make([]interface{}, 0, len(items))
+	seen := map[string]bool{}
 	for _, item := range items {
-		duplicate := false
-		for _, seen := range result {
-			if reflect.DeepEqual(seen, item) {
-				duplicate = true
-				break
+		if typeName, ok := item.(string); ok {
+			if seen[typeName] {
+				continue
 			}
+			seen[typeName] = true
 		}
-		if !duplicate {
-			result = append(result, item)
-		}
+		result = append(result, item)
 	}
 	return result
 }

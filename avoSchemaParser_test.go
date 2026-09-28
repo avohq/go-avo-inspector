@@ -124,7 +124,32 @@ func TestExtractSchema_TypedGoValues(t *testing.T) {
 			`{"propertyName":"complex","propertyType":"unknown"},`+
 			`{"propertyName":"funcs","propertyType":"list(object)","children":["unknown"]},`+
 			`{"propertyName":"nullFirst","propertyType":"list(string)","children":["null","int"]},`+
-			`{"propertyName":"nestedList","propertyType":"list(object)","children":[["int"]]}]`)
+			`{"propertyName":"nestedList","propertyType":"list(object)","children":[["int"],["int"]]}]`)
+}
+
+// List children keep one entry per object or list element, even when two are identical; only type
+// strings are deduplicated. The expected values are the reference Node parser's output for the
+// same inputs (SPEC.md §9.3.3).
+func TestExtractSchema_DedupMatchesReferenceParser(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    OrderedMap
+		expected string
+	}{
+		{"nested lists", om{{"v", list{list{1}, list{2}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[["int"],["int"]]}]`},
+		{"identical objects", om{{"v", list{om{{"a", 1}}, om{{"a", 1}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"}],[{"propertyName":"a","propertyType":"int"}]]}]`},
+		{"mixed", om{{"v", list{list{"x"}, list{"x"}, "s", "s", 1, om{{"b", true}}, om{{"b", true}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[["string"],["string"],"string","int",[{"propertyName":"b","propertyType":"boolean"}],[{"propertyName":"b","propertyType":"boolean"}]]}]`},
+		{"deep", om{{"v", list{list{list{1, 1}, list{1}}, list{list{1}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[["int"],["int"]],[["int"]]]}]`},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertSchemaJSON(t, extractSchema(tc.input), tc.expected)
+		})
+	}
 }
 
 // SPEC.md §9.3.2: past the depth limit a complex value is truncated to an empty "object".
