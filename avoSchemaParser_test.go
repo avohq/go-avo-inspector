@@ -314,3 +314,11 @@ func TestExtractSchema_OrderedMapVariantsAreObjects(t *testing.T) {
 	assertSchemaJSON(t, extractSchema(om{{"nil", nilPointer}, {"nilNamed", namedKeyValues(nil)}}),
 		`[{"propertyName":"nil","propertyType":"null"},{"propertyName":"nilNamed","propertyType":"null"}]`)
 }
+
+// A sub-slice shares its parent's backing array but is a different value, not a cycle.
+func TestExtractSchema_SubSliceIsNotACycle(t *testing.T) {
+	s := []interface{}{"a", nil}
+	s[1] = s[:1]
+	assertSchemaJSON(t, extractSchema(om{{"v", s}}),
+		`[{"propertyName":"v","propertyType":"list(string)","children":["string",["string"]]}]`)
+}

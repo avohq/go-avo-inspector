@@ -85,7 +85,15 @@ func extractSchema(eventProperties interface{}) []Property {
 // being mapped. A value that is its own ancestor (a cycle) is cut like a value past the depth cap,
 // so a map holding itself under several keys cannot expand exponentially.
 type schemaParser struct {
-	ancestors []uintptr
+	ancestors []nodeIdentity
+}
+
+// nodeIdentity identifies a map or slice value. A slice is identified by its backing array, its
+// length and its type, so a sub-slice that shares its parent's array is a different value.
+type nodeIdentity struct {
+	pointer uintptr
+	length  int
+	typ     reflect.Type
 }
 
 // valueKind is the schema category of a value. Every value is classified once, by its Go type or
@@ -314,26 +322,26 @@ func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} 
 	return removeDuplicates(mapped)
 }
 
-// identity returns the address that identifies a map, slice or OrderedMap for cycle detection, or
-// false for values that cannot contain themselves (arrays held by value, empty slices).
-func identity(value interface{}) (uintptr, bool) {
+// identity returns what identifies a map, slice or OrderedMap for cycle detection, or false for
+// values that cannot contain themselves (arrays held by value, empty slices).
+func identity(value interface{}) (nodeIdentity, bool) {
 	rv := reflect.ValueOf(value)
 	for rv.Kind() == reflect.Ptr {
 		if rv.Elem().Kind() == reflect.Array {
-			return rv.Pointer(), true
+			return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}, true
 		}
 		rv = rv.Elem()
 	}
 	switch rv.Kind() {
 	case reflect.Map:
-		return rv.Pointer(), true
+		return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}, true
 	case reflect.Slice:
 		if rv.Len() == 0 {
-			return 0, false
+			return nodeIdentity{}, false
 		}
-		return rv.Pointer(), true
+		return nodeIdentity{pointer: rv.Pointer(), length: rv.Len(), typ: rv.Type()}, true
 	default:
-		return 0, false
+		return nodeIdentity{}, false
 	}
 }
 
