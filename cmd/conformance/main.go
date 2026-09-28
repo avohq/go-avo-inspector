@@ -115,7 +115,10 @@ func run(stdin io.Reader, stdout io.Writer) int {
 		return 2
 	}
 
-	writeEnvelope(stdout, &fixtureID, true, actual, outcome, "")
+	if err := writeEnvelope(stdout, &fixtureID, true, actual, outcome, ""); err != nil {
+		fmt.Fprintln(os.Stderr, "output write failed:", err)
+		return 1
+	}
 	return 0
 }
 
@@ -238,7 +241,9 @@ func runSequence(inspector *avoinspector.AvoInspector, envelope avoinspector.Ord
 	return records, nil
 }
 
-func writeEnvelope(stdout io.Writer, fixtureID *string, passed bool, actual interface{}, outcome string, errorMessage string) {
+// writeEnvelope writes the output envelope line and returns the write error. The error paths in
+// run ignore it: they already exit nonzero.
+func writeEnvelope(stdout io.Writer, fixtureID *string, passed bool, actual interface{}, outcome string, errorMessage string) error {
 	envelope := outputEnvelope{FixtureID: fixtureID, Passed: passed, Actual: actual, Outcome: outcome}
 	if errorMessage != "" {
 		envelope.Error = &errorMessage
@@ -248,7 +253,8 @@ func writeEnvelope(stdout io.Writer, fixtureID *string, passed bool, actual inte
 		fmt.Fprintln(os.Stderr, "output encoding failed:", err)
 		encoded = []byte(`{"fixture_id":null,"passed":false,"actual":null,"outcome":"resolve","error":"output encoding failed"}`)
 	}
-	fmt.Fprintf(stdout, "%s\n", encoded)
+	_, err = fmt.Fprintf(stdout, "%s\n", encoded)
+	return err
 }
 
 // decodeJSON decodes a JSON document keeping what a map[string]interface{} would lose: objects

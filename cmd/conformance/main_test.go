@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -20,5 +21,18 @@ func TestHarness_KeepsIntegerLiteralsOutsideInt64AsInt(t *testing.T) {
 		`{"propertyName":"zero","propertyType":"float"},{"propertyName":"exp","propertyType":"float"}]`
 	if !strings.Contains(stdout.String(), expected) {
 		t.Errorf("unexpected output %s", stdout.String())
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// Exit code 0 means the output envelope was written, so a failed write is a harness failure
+// (runner contract, "Exit codes").
+func TestHarness_ExitsOneWhenTheEnvelopeWriteFails(t *testing.T) {
+	input := `{"suite":"schema-extraction","fixture_id":"w","constructor":{"apiKey":"k","env":"dev","version":"1"},"input":{"a":1}}` + "\n"
+	if code := run(strings.NewReader(input), failingWriter{}); code != 1 {
+		t.Fatalf("exit code %d, want 1", code)
 	}
 }
