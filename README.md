@@ -228,8 +228,7 @@ These are the behaviour changes you may notice:
   element and the `sessionId`, `trackingId`, `avoFunction`, `eventId` and `eventHash` fields are no
   longer sent. `createdAt` has millisecond precision and `libVersion` is `2.0.0`.
 
-  sessionId is not sent; ingestion treats it as optional since monorepo #10017 (Sep 2026), the
-  same wire shape as the C# SDK 1.1.0.
+  The Inspector API accepts events without `sessionId`; the C# SDK 1.1.0 sends the same shape.
 
 ## Conformance
 
