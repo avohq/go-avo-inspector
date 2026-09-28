@@ -134,7 +134,7 @@ func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appN
 }
 
 // NewAvoInspectorWithOptions creates an inspector. It returns an error if ApiKey or AppVersion is
-// empty or whitespace, or if ApiKey contains CR, LF or NUL.
+// empty or whitespace, or if ApiKey contains a control character other than tab.
 func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 	if strings.TrimSpace(options.ApiKey) == "" {
 		return nil, errors.New(noApiKeyMessage)

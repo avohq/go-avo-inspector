@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -99,7 +98,7 @@ type sendResult struct {
 }
 
 var (
-	errUnsafeHeader   = errors.New("apiKey contains CR, LF or NUL and cannot be sent as a header")
+	errUnsafeHeader   = errors.New("apiKey contains a control character and cannot be sent as a header")
 	errRequestTimeout = errors.New("Request timed out")
 	errRequestFailed  = errors.New("Request failed")
 	errRequestAborted = errors.New("Request abandoned (destroyed)")
@@ -131,10 +130,16 @@ func (h *AvoNetworkCallsHandler) endpoint() string {
 	return trackingEndpoint
 }
 
-// isSafeHeaderValue reports whether value can be written as a header value without CR, LF or NUL
-// terminating the header line (SPEC.md §7.2).
+// isSafeHeaderValue reports whether value can be sent as a header value. SPEC.md §7.2 requires
+// refusing CR, LF and NUL; net/http also refuses every other control character except tab, so
+// those are refused here too, with the same outcome.
 func isSafeHeaderValue(value string) bool {
-	return !strings.ContainsAny(value, "\r\n\x00")
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // send posts one batch and never retries. ctx is cancelled by Destroy to abandon the request.

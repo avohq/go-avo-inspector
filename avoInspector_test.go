@@ -1,6 +1,8 @@
 package avoinspector
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -685,5 +687,24 @@ func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
 				t.Errorf("the timer fired early: %d requests", n)
 			}
 		})
+	}
+}
+
+// net/http refuses every control character in a header value except tab, so the constructor
+// rejects all of them with the spec's message, and the send-time guard refuses them too.
+func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
+	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey"} {
+		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
+		if err == nil || err.Error() != apiKeyControlMessage || inspector != nil {
+			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyControlMessage, inspector, err)
+		}
+		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		if !errors.Is(result.err, errUnsafeHeader) {
+			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
+		}
+	}
+	inspector := mustInspector(t, Options{ApiKey: "key\twith-tab"})
+	if inspector.apiKey != "key\twith-tab" {
+		t.Errorf("a tab is a valid header character and must be kept")
 	}
 }

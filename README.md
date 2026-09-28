@@ -72,8 +72,8 @@ avoInspector, err := avoinspector.NewAvoInspector(
 ```
 
 `NewAvoInspector` returns an error if the API key or the app version is empty or whitespace, or if
-the API key contains a carriage return, line feed or NUL character. An empty or unknown environment
-falls back to `Dev` with a warning.
+the API key contains a control character other than tab (such as a carriage return, line feed or
+NUL). An empty or unknown environment falls back to `Dev` with a warning.
 
 To configure batching, use `NewAvoInspectorWithOptions`:
 
@@ -216,8 +216,9 @@ These are the behaviour changes you may notice:
   becomes `Dev`, with a warning: each event is sent immediately and logging is turned on. In v1.0.0
   only an empty env did this, and any other value was sent as given.
 - **Stricter validation.** A whitespace-only API key or app version is rejected, and so is an API
-  key containing a carriage return, line feed or NUL character. The missing-version error message
-  now reads "Many features of Inspector rely on versioning" (it was "Some features").
+  key containing a control character other than tab (such as a carriage return, line feed or NUL).
+  The missing-version error message now reads "Many features of Inspector rely on versioning" (it
+  was "Some features").
 - **Logs go to stderr.** All logs are written to stderr with an `[Avo Inspector] ` prefix. v1.0.0
   wrote some to stdout and some through the standard `log` package. Failed sends and internal
   errors are now logged even when logging is off.
