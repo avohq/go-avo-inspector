@@ -252,8 +252,9 @@ func writeEnvelope(stdout io.Writer, fixtureID *string, passed bool, actual inte
 }
 
 // decodeJSON decodes a JSON document keeping what a map[string]interface{} would lose: objects
-// become avoinspector.OrderedMap in source order, and a number literal becomes an int64 when it is
-// written as an integer and a float64 otherwise, so 3 is "int" and 3.0 is "float" (SPEC.md §9.3.1.1).
+// become avoinspector.OrderedMap in source order, and a number literal written as an integer
+// becomes an int64 (or stays a json.Number outside the int64 range) and any other becomes a
+// float64, so 3 is "int" and 3.0 is "float" (SPEC.md §9.3.1.1).
 func decodeJSON(document string) (interface{}, error) {
 	decoder := json.NewDecoder(strings.NewReader(document))
 	decoder.UseNumber()
@@ -305,13 +306,14 @@ func decodeValue(decoder *json.Decoder) (interface{}, error) {
 		}
 		return nil, fmt.Errorf("unexpected delimiter %v", t)
 	case json.Number:
-		literal := string(t)
-		if !strings.ContainsAny(literal, ".eE") {
-			if integer, err := t.Int64(); err == nil {
-				return integer, nil
-			}
+		if strings.ContainsAny(string(t), ".eE") {
+			return t.Float64()
 		}
-		return t.Float64()
+		if integer, err := t.Int64(); err == nil {
+			return integer, nil
+		}
+		// Outside the int64 range: pass the literal through, which the SDK classifies as "int".
+		return t, nil
 	default:
 		return t, nil
 	}
