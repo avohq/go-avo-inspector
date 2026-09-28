@@ -145,8 +145,8 @@ inspector stays usable. Delivery failures are never reported. `Flush(0)` sends t
 without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
-background flush. After `Destroy`, tracking calls send nothing. Call `Destroy` when you are done with
-an inspector that you do not keep for the life of the process.
+background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine
+or timer, so one you stop using after a `Flush` is garbage-collected even without `Destroy`.
 
 ## Conformance
 

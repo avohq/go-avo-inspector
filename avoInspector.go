@@ -107,9 +107,13 @@ type AvoInspector struct {
 	inFlight     map[uint64]chan struct{}
 	nextSendID   uint64
 	destroyed    bool
-	stopTimer    chan struct{}
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// flushTimer is armed while the pending batch holds events and the batch timer is enabled.
+	// timerGeneration changes whenever the batch is swapped out, so a timer that fires after its
+	// batch was already taken does nothing.
+	flushTimer      *time.Timer
+	timerGeneration uint64
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 func init() {
@@ -180,10 +184,6 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		inFlight:               map[uint64]chan struct{}{},
 		ctx:                    ctx,
 		cancel:                 cancel,
-	}
-	if batchSize > 1 && !options.DisableBatchTimer {
-		inspector.stopTimer = make(chan struct{})
-		go inspector.runBatchTimer(time.Duration(batchFlushSeconds*float64(time.Second)), inspector.stopTimer)
 	}
 	return inspector, nil
 }
@@ -294,8 +294,9 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		dropped++
 	}
 	if len(inspector.pending) >= inspector.batchSize {
-		batch = inspector.pending
-		inspector.pending = nil
+		batch = inspector.takePending()
+	} else {
+		inspector.armFlushTimer()
 	}
 	inspector.mu.Unlock()
 
@@ -402,8 +403,7 @@ func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 		inspector.mu.Unlock()
 		return nil
 	}
-	batch := inspector.pending
-	inspector.pending = nil
+	batch := inspector.takePending()
 	inspector.mu.Unlock()
 
 	if len(batch) > 0 {
@@ -448,39 +448,50 @@ func (inspector *AvoInspector) Destroy() {
 		return
 	}
 	inspector.destroyed = true
-	inspector.pending = nil
+	inspector.takePending()
 	inspector.inFlight = map[uint64]chan struct{}{}
-	stopTimer := inspector.stopTimer
-	inspector.stopTimer = nil
 	inspector.mu.Unlock()
 
-	if stopTimer != nil {
-		close(stopTimer)
-	}
 	inspector.cancel()
 }
 
-// runBatchTimer flushes the pending batch every period, so no event waits longer than
-// batchFlushSeconds (SPEC.md §12.3). It does not keep the process alive.
-func (inspector *AvoInspector) runBatchTimer(period time.Duration, stop <-chan struct{}) {
-	if period < time.Millisecond {
-		period = time.Millisecond
+// takePending swaps out the pending batch and disarms the flush timer. Call it with mu held.
+func (inspector *AvoInspector) takePending() []wireEvent {
+	batch := inspector.pending
+	inspector.pending = nil
+	if inspector.flushTimer != nil {
+		inspector.flushTimer.Stop()
+		inspector.flushTimer = nil
 	}
-	ticker := time.NewTicker(period)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			inspector.mu.Lock()
-			batch := inspector.pending
-			inspector.pending = nil
-			inspector.mu.Unlock()
-			if len(batch) > 0 {
-				inspector.dispatch(batch)
-			}
-		}
+	inspector.timerGeneration++
+	return batch
+}
+
+// armFlushTimer starts the one-shot flush timer when the first event enters an empty batch, so no
+// event waits longer than batchFlushSeconds (SPEC.md §12.3). Nothing runs while the batch is
+// empty, so an idle inspector holds no goroutine or timer. Call it with mu held.
+func (inspector *AvoInspector) armFlushTimer() {
+	if inspector.disableBatchTimer || inspector.batchSize <= 1 || inspector.flushTimer != nil || len(inspector.pending) == 0 {
+		return
+	}
+	delay := time.Duration(inspector.batchFlushSeconds * float64(time.Second))
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	generation := inspector.timerGeneration
+	inspector.flushTimer = time.AfterFunc(delay, func() { inspector.onFlushTimer(generation) })
+}
+
+func (inspector *AvoInspector) onFlushTimer(generation uint64) {
+	inspector.mu.Lock()
+	if inspector.destroyed || generation != inspector.timerGeneration {
+		inspector.mu.Unlock()
+		return
+	}
+	batch := inspector.takePending()
+	inspector.mu.Unlock()
+	if len(batch) > 0 {
+		inspector.dispatch(batch)
 	}
 }
 

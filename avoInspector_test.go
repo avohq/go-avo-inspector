@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -282,8 +283,8 @@ func TestBatching_DisableBatchTimer(t *testing.T) {
 	if n := len(server.captured()); n != 0 {
 		t.Errorf("expected no scheduled flush with DisableBatchTimer, got %d requests", n)
 	}
-	if inspector.stopTimer != nil {
-		t.Errorf("expected no timer goroutine")
+	if inspector.flushTimer != nil {
+		t.Errorf("expected no flush timer")
 	}
 }
 
@@ -339,7 +340,7 @@ func TestDestroy_DiscardsPendingAndStopsTracking(t *testing.T) {
 	}
 	inspector.mu.Lock()
 	defer inspector.mu.Unlock()
-	if inspector.samplingRate != 0.75 || len(inspector.pending) != 0 || len(inspector.inFlight) != 0 || inspector.stopTimer != nil {
+	if inspector.samplingRate != 0.75 || len(inspector.pending) != 0 || len(inspector.inFlight) != 0 || inspector.flushTimer != nil {
 		t.Errorf("unexpected post-destroy state: rate %v pending %d inFlight %d", inspector.samplingRate, len(inspector.pending), len(inspector.inFlight))
 	}
 	if inspector.apiKey != "test-key" || inspector.version != "1.0.0" {
@@ -526,5 +527,83 @@ func TestFlush_NegativeWaitsForInFlightSends(t *testing.T) {
 	}
 	if n := len(server.captured()); n != 1 {
 		t.Errorf("expected the send to have completed, got %d requests", n)
+	}
+}
+
+// An idle inspector runs nothing: the flush timer is armed only while events are pending, so
+// tracking starts no goroutine and a flushed inspector is back to the baseline.
+func TestBatchTimer_IdleInspectorHoldsNoGoroutine(t *testing.T) {
+	t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	baseline := runtime.NumGoroutine()
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: 3600})
+	inspector.EnableLogging(false)
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	if n := runtime.NumGoroutine(); n > baseline {
+		t.Errorf("an armed flush timer must not hold a goroutine: %d goroutines, baseline %d", n, baseline)
+	}
+	_ = inspector.Flush(2 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > baseline {
+		t.Errorf("after Flush, %d goroutines remain, baseline %d", n, baseline)
+	}
+}
+
+// An inspector dropped without Destroy is garbage-collected once its batch is flushed.
+func TestBatchTimer_DroppedInspectorIsCollected(t *testing.T) {
+	t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	collected := make(chan struct{})
+	func() {
+		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: "k", Env: Staging, AppVersion: "1", BatchSize: 30, BatchFlushSeconds: 3600})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inspector.EnableLogging(false)
+		_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+		_ = inspector.Flush(2 * time.Second)
+		runtime.SetFinalizer(inspector, func(*AvoInspector) { close(collected) })
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		select {
+		case <-collected:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Errorf("an idle inspector dropped without Destroy was never collected")
+}
+
+// The timer fires once per batch, BatchFlushSeconds after the first event entered it, and is
+// disarmed whenever the batch is swapped out.
+func TestBatchTimer_ArmedOnlyWhilePending(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, BatchFlushSeconds: 3600})
+	armed := func() bool {
+		inspector.mu.Lock()
+		defer inspector.mu.Unlock()
+		return inspector.flushTimer != nil
+	}
+	if armed() {
+		t.Fatalf("timer armed before any event")
+	}
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	if !armed() {
+		t.Fatalf("timer not armed by the first event")
+	}
+	_, _ = inspector.TrackSchemaFromEvent("E2", nil) // size trigger swaps the batch out
+	if armed() {
+		t.Errorf("timer still armed after the size trigger")
+	}
+	_, _ = inspector.TrackSchemaFromEvent("E3", nil)
+	_ = inspector.Flush(2 * time.Second)
+	if armed() {
+		t.Errorf("timer still armed after Flush")
+	}
+	if n := len(server.captured()); n != 2 {
+		t.Errorf("expected 2 requests, got %d", n)
 	}
 }
