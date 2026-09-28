@@ -414,8 +414,11 @@ func (inspector *AvoInspector) startSend(send *inFlightSend) <-chan sendResult {
 			logIfEnabled("sent %d event(s).", len(batch))
 		case sendNon200:
 			logIfEnabled("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
-		default:
-			logError("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
+		case sendFailed:
+			// A send abandoned by Destroy is not a failure.
+			if !errors.Is(res.err, errRequestAborted) {
+				logError("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
+			}
 		}
 		result <- res
 	}()

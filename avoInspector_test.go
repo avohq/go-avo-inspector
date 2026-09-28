@@ -708,3 +708,33 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 		t.Errorf("a tab is a valid header character and must be kept")
 	}
 }
+
+// A send that Destroy abandons is not a failure and is not logged, as in Node and Java.
+func TestDestroy_AbandonedSendIsNotLogged(t *testing.T) {
+	release := make(chan struct{})
+	newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
+	defer close(release)
+	logs := captureLogs(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_ = inspector.Flush(0)
+	inspector.mu.Lock()
+	var sends []chan struct{}
+	for _, done := range inspector.inFlight {
+		sends = append(sends, done)
+	}
+	inspector.mu.Unlock()
+	if len(sends) != 1 {
+		t.Fatalf("expected one send in flight, got %d", len(sends))
+	}
+	inspector.Destroy()
+	select {
+	case <-sends[0]:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Destroy did not abandon the send")
+	}
+	if output := logs(); output != "" {
+		t.Errorf("expected no log for an abandoned send, got %q", output)
+	}
+}
