@@ -149,6 +149,44 @@ without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
 background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine
 or timer, so one you stop using after a `Flush` is garbage-collected even without `Destroy`.
 
+## Upgrading from v1.0.0
+
+v1.1.0 keeps every v1.0.0 function and type, so existing code compiles unchanged. These are the
+behaviour changes you may notice:
+
+- **List children moved.** A list property's element schemas are now in `Property.ListChildren`, in
+  the spec's shape (type strings, nested schemas, nested lists). `Property.Children` now holds only
+  the children of an `object` property; for lists it is nil, where v1.0.0 put one entry per index,
+  named `"0"`, `"1"`, and so on.
+- **Type names changed.** Booleans are `"boolean"` instead of `"bool"`, and lists are
+  `"list(<element type>)"` (typed by the first element, e.g. `"list(string)"`) instead of `"list"`.
+  Typed slices and maps such as `[]string` or `map[string]string` are now read as lists and objects
+  instead of `"unknown"`.
+- **Property order is sorted.** A `map[string]interface{}` is listed sorted by key; in v1.0.0 the
+  order was random. Use `OrderedMap` to choose the order.
+- **`error` no longer reports HTTP failures.** `TrackSchemaFromEvent` returns an error only for an
+  internal failure before the event was queued. A failed send is logged and dropped. In `Dev`, a
+  non-200 response returns an empty schema.
+- **Events are buffered outside `Dev`.** In `Staging` and `Prod`, events are sent in batches in the
+  background instead of during the call. Call `Flush` before the process exits, or buffered events
+  are lost. `Dev` still sends each event before the call returns.
+- **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process, and it
+  now also controls the network logs, which in v1.0.0 it never reached.
+- **Unknown environments fall back to `Dev`.** Any env other than `Dev`, `Staging` or `Prod` now
+  becomes `Dev`, with a warning: each event is sent immediately and logging is turned on. In v1.0.0
+  only an empty env did this, and any other value was sent as given.
+- **Stricter validation.** A whitespace-only API key or app version is rejected, and so is an API
+  key containing a carriage return, line feed or NUL character. The missing-version error message
+  now reads "Many features of Inspector rely on versioning" (it was "Some features").
+- **Logs go to stderr.** All logs are written to stderr with an `[Avo Inspector] ` prefix. v1.0.0
+  wrote some to stdout and some through the standard `log` package. Failed sends and internal
+  errors are now logged even when logging is off.
+- **New endpoint and wire body.** Events go to `https://api.avo.app/inspector/v2/track` with
+  `api-key`, `env` and `X-Avo-Client` headers and `Content-Type: application/json`, gzipped when
+  1024 bytes or larger. Each event is one element of the body. The separate `sessionStarted`
+  element and the `sessionId`, `trackingId`, `avoFunction`, `eventId` and `eventHash` fields are no
+  longer sent. `createdAt` has millisecond precision and `libVersion` is `1.1.0`.
+
 ## Conformance
 
 `scripts/run-conformance.sh` builds the conformance harness (`cmd/conformance`, runner contract
