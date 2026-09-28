@@ -279,7 +279,7 @@ func (inspector *AvoInspector) TrackOrderedSchemaFromEvent(eventName string, eve
 
 func (inspector *AvoInspector) track(eventName string, eventProperties interface{}, options TrackOptions) (schema []Property, err error) {
 	inspector.mu.Lock()
-	destroyed := inspector.destroyed
+	destroyed, samplingRate := inspector.destroyed, inspector.samplingRate
 	inspector.mu.Unlock()
 	if destroyed {
 		return []Property{}, nil
@@ -299,9 +299,6 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	}
 	logIfEnabled("supplied event %q", eventName)
 
-	inspector.mu.Lock()
-	samplingRate := inspector.samplingRate
-	inspector.mu.Unlock()
 	// SPEC.md §7.7: per-event sampling at enqueue.
 	if rand.Float64() > samplingRate {
 		logIfEnabled("event %q dropped due to sampling rate.", eventName)
