@@ -426,8 +426,8 @@ func (inspector *AvoInspector) startSend(send *inFlightSend) <-chan sendResult {
 }
 
 // Flush sends every pending event and waits until all in-flight sends have completed, or until
-// timeout has passed. Flush(0) sends without waiting; a negative timeout means DefaultFlushTimeout
-// (10 seconds). Flush always completes (SPEC.md §4.6): the
+// timeout has passed. Flush(0) sends without waiting and returns nil; a negative timeout means
+// DefaultFlushTimeout (10 seconds). Flush always completes (SPEC.md §4.6): the
 // returned error is informational and callers may ignore it. It is ErrFlushTimeout when the timeout
 // passed first and nil otherwise; either way the pending events were sent and the inspector stays
 // usable. Delivery failures are not reported. Call Flush before the process or serverless handler
@@ -450,6 +450,9 @@ func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 
 	if send != nil {
 		inspector.startSend(send)
+	}
+	if timeout == 0 {
+		return nil
 	}
 
 	deadline := time.Now().Add(timeout)

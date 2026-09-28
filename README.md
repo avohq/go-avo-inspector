@@ -179,7 +179,7 @@ before the process exits (see [Shutdown](#shutdown)). It always completes, and i
 informational: you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
 when the timeout passed, and `nil` otherwise; in both cases the pending events were sent and the
 inspector stays usable. Delivery failures are never reported. `Flush(0)` sends the pending events
-without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
+without waiting for them and returns `nil`; a negative timeout waits up to `DefaultFlushTimeout`.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
 background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine

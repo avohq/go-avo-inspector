@@ -509,8 +509,9 @@ func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
 	start := time.Now()
-	if err := inspector.Flush(0); err != ErrFlushTimeout {
-		t.Errorf("expected ErrFlushTimeout while the send is still in flight, got %v", err)
+	// Not waiting was asked for, so it is not a timeout.
+	if err := inspector.Flush(0); err != nil {
+		t.Errorf("expected nil from Flush(0) while the send is still in flight, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("Flush(0) waited %v", elapsed)
