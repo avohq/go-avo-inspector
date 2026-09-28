@@ -74,42 +74,167 @@ type OrderedMap []KeyValue
 // map[string]interface{}, an OrderedMap, or any other string-keyed map; anything else yields an
 // empty schema. It has no recover of its own: the safe boundary is AvoInspector.ExtractSchema.
 func extractSchema(eventProperties interface{}) []Property {
-	entries, ok := objectEntries(eventProperties)
-	if !ok {
+	if classify(eventProperties) != kindObject {
 		return []Property{}
 	}
-	return mapObject(entries, 0)
+	return mapObject(objectEntries(eventProperties), 0)
+}
+
+// valueKind is the schema category of a value. Every value is classified once, by its Go type or
+// reflect.Kind, without copying its keys or elements; those are materialized only when the parser
+// descends into the value.
+type valueKind int
+
+const (
+	kindUnknown valueKind = iota
+	kindNull
+	kindString
+	kindInt
+	kindFloat
+	kindBool
+	kindObject
+	kindList
+)
+
+// classify returns the kind of value. A nil value, or a nil pointer, map or slice, is null. Any
+// floating type is "float", including a whole-valued 0.0 (SPEC.md §9.3.1).
+func classify(value interface{}) valueKind {
+	switch v := value.(type) {
+	case nil:
+		return kindNull
+	case string:
+		return kindString
+	case bool:
+		return kindBool
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr:
+		return kindInt
+	case float32, float64:
+		return kindFloat
+	case json.Number:
+		if strings.ContainsAny(string(v), ".eE") {
+			return kindFloat
+		}
+		return kindInt
+	case OrderedMap:
+		if v == nil {
+			return kindNull
+		}
+		return kindObject
+	case map[string]interface{}:
+		if v == nil {
+			return kindNull
+		}
+		return kindObject
+	case []interface{}:
+		if v == nil {
+			return kindNull
+		}
+		return kindList
+	}
+	rv := reflect.ValueOf(value)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return kindNull
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.String:
+		return kindString
+	case reflect.Bool:
+		return kindBool
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return kindInt
+	case reflect.Float32, reflect.Float64:
+		return kindFloat
+	case reflect.Map:
+		if rv.IsNil() {
+			return kindNull
+		}
+		if rv.Type().Key().Kind() == reflect.String {
+			return kindObject
+		}
+	case reflect.Slice:
+		if rv.IsNil() {
+			return kindNull
+		}
+		return kindList
+	case reflect.Array:
+		return kindList
+	}
+	return kindUnknown
+}
+
+// basicTypeName is the SPEC.md §9.2 getBasicPropType: a nested object or list is "object".
+func basicTypeName(kind valueKind) string {
+	switch kind {
+	case kindNull:
+		return "null"
+	case kindString:
+		return "string"
+	case kindInt:
+		return "int"
+	case kindFloat:
+		return "float"
+	case kindBool:
+		return "boolean"
+	case kindObject, kindList:
+		return "object"
+	default:
+		return "unknown"
+	}
+}
+
+// propValueType is the SPEC.md §9.2 getPropValueType: a list is typed by its first element, and
+// an empty list (or one whose first element is null) defaults to "list(string)".
+func propValueType(value interface{}, kind valueKind) string {
+	if kind != kindList {
+		return basicTypeName(kind)
+	}
+	first, ok := firstElement(value)
+	if !ok {
+		return "list(string)"
+	}
+	switch firstKind := classify(first); firstKind {
+	case kindNull:
+		return "list(string)"
+	case kindUnknown:
+		// "list(unknown)" is not a valid propertyType (SPEC.md §7.3.4).
+		return "list(object)"
+	default:
+		return "list(" + basicTypeName(firstKind) + ")"
+	}
 }
 
 // mapping is the SPEC.md §9.2 mapping function for a value found inside a list: an object maps to
 // its []Property, a list to its deduplicated element schemas, and a scalar to its type string.
-func mapping(value interface{}, depth int) interface{} {
-	if entries, ok := objectEntries(value); ok {
-		return mapObject(entries, depth)
+func mapping(value interface{}, kind valueKind, depth int) interface{} {
+	switch kind {
+	case kindObject:
+		return mapObject(objectEntries(value), depth)
+	case kindList:
+		return mapList(listElements(value), depth)
+	default:
+		return basicTypeName(kind)
 	}
-	if elements, ok := listElements(value); ok {
-		return mapList(elements, depth)
-	}
-	return getBasicPropType(value)
 }
 
 func mapObject(entries []KeyValue, depth int) []Property {
 	result := make([]Property, 0, len(entries))
 	for _, entry := range entries {
-		property := Property{PropertyName: entry.Key, PropertyType: getPropValueType(entry.Value)}
-		if nested, ok := objectEntries(entry.Value); ok {
-			if depth >= maxSchemaDepth {
-				property.Children = []Property{}
-			} else {
-				property.Children = mapObject(nested, depth+1)
-			}
-		} else if elements, ok := listElements(entry.Value); ok {
-			if depth >= maxSchemaDepth {
-				property.PropertyType = "object"
-				property.Children = []Property{}
-			} else {
-				property.ListChildren = mapList(elements, depth+1)
-			}
+		kind := classify(entry.Value)
+		property := Property{PropertyName: entry.Key, PropertyType: propValueType(entry.Value, kind)}
+		switch {
+		case kind == kindObject && depth >= maxSchemaDepth:
+			property.Children = []Property{}
+		case kind == kindObject:
+			property.Children = mapObject(objectEntries(entry.Value), depth+1)
+		case kind == kindList && depth >= maxSchemaDepth:
+			property.PropertyType = "object"
+			property.Children = []Property{}
+		case kind == kindList:
+			property.ListChildren = mapList(listElements(entry.Value), depth+1)
 		}
 		result = append(result, property)
 	}
@@ -119,155 +244,78 @@ func mapObject(entries []KeyValue, depth int) []Property {
 func mapList(elements []interface{}, depth int) []interface{} {
 	mapped := make([]interface{}, 0, len(elements))
 	for _, element := range elements {
-		if depth >= maxSchemaDepth && isComplex(element) {
+		kind := classify(element)
+		if depth >= maxSchemaDepth && (kind == kindObject || kind == kindList) {
 			mapped = append(mapped, "object")
 		} else {
-			mapped = append(mapped, mapping(element, depth+1))
+			mapped = append(mapped, mapping(element, kind, depth+1))
 		}
 	}
 	return removeDuplicates(mapped)
 }
 
-// getPropValueType is the SPEC.md §9.2 getPropValueType: a list is typed by its first element, and
-// an empty list (or one whose first element is null) defaults to "list(string)".
-func getPropValueType(value interface{}) string {
-	elements, ok := listElements(value)
-	if !ok {
-		return getBasicPropType(value)
-	}
-	if len(elements) == 0 || isNil(elements[0]) {
-		return "list(string)"
-	}
-	elementType := getBasicPropType(elements[0])
-	if elementType == "unknown" {
-		// "list(unknown)" is not a valid propertyType (SPEC.md §7.3.4).
-		return "list(object)"
-	}
-	return "list(" + elementType + ")"
-}
-
-// getBasicPropType classifies a single value by its Go type (SPEC.md §9.2, §9.3). Any floating
-// type is "float", including a whole-valued 0.0 (§9.3.1). A nested object or list is "object".
-func getBasicPropType(value interface{}) string {
-	if isNil(value) {
-		return "null"
-	}
-	if number, ok := value.(json.Number); ok {
-		if strings.ContainsAny(string(number), ".eE") {
-			return "float"
-		}
-		return "int"
-	}
-	if _, ok := objectEntries(value); ok {
-		return "object"
-	}
-	if _, ok := listElements(value); ok {
-		return "object"
-	}
-	v := reflect.Indirect(reflect.ValueOf(value))
-	switch v.Kind() {
-	case reflect.String:
-		return "string"
-	case reflect.Bool:
-		return "boolean"
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return "int"
-	case reflect.Float32, reflect.Float64:
-		return "float"
-	default:
-		return "unknown"
-	}
-}
-
-func isComplex(value interface{}) bool {
-	if _, ok := objectEntries(value); ok {
-		return true
-	}
-	_, ok := listElements(value)
-	return ok
-}
-
-// isNil reports whether value is nil or a nil pointer, map, slice or interface.
-func isNil(value interface{}) bool {
-	if value == nil {
-		return true
-	}
-	v := reflect.ValueOf(value)
-	switch v.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface:
-		return v.IsNil()
-	default:
-		return false
-	}
-}
-
-// objectEntries returns the entries of an object value: an OrderedMap keeps its order, any other
-// string-keyed map is sorted by key. Nil values are not objects.
-func objectEntries(value interface{}) ([]KeyValue, bool) {
+// objectEntries returns the entries of a value classified as an object: an OrderedMap keeps its
+// order, any other string-keyed map is sorted by key.
+func objectEntries(value interface{}) []KeyValue {
 	switch v := value.(type) {
-	case nil:
-		return nil, false
 	case OrderedMap:
-		if v == nil {
-			return nil, false
-		}
-		return v, true
+		return v
 	case map[string]interface{}:
-		if v == nil {
-			return nil, false
-		}
 		keys := make([]string, 0, len(v))
 		for key := range v {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		entries := make([]KeyValue, 0, len(keys))
-		for _, key := range keys {
-			entries = append(entries, KeyValue{Key: key, Value: v[key]})
+		entries := make([]KeyValue, len(keys))
+		for i, key := range keys {
+			entries[i] = KeyValue{Key: key, Value: v[key]}
 		}
-		return entries, true
+		return entries
 	}
-	rv := reflect.Indirect(reflect.ValueOf(value))
-	if rv.Kind() != reflect.Map || rv.IsNil() || rv.Type().Key().Kind() != reflect.String {
-		return nil, false
-	}
+	rv := indirect(reflect.ValueOf(value))
 	keys := rv.MapKeys()
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
-	entries := make([]KeyValue, 0, len(keys))
-	for _, key := range keys {
-		entries = append(entries, KeyValue{Key: key.String(), Value: rv.MapIndex(key).Interface()})
+	entries := make([]KeyValue, len(keys))
+	for i, key := range keys {
+		entries[i] = KeyValue{Key: key.String(), Value: rv.MapIndex(key).Interface()}
 	}
-	return entries, true
+	return entries
 }
 
-// listElements returns the elements of a list value (any slice or array other than an
-// OrderedMap). Nil slices are not lists.
-func listElements(value interface{}) ([]interface{}, bool) {
-	switch v := value.(type) {
-	case nil, OrderedMap:
-		return nil, false
-	case []interface{}:
-		if v == nil {
-			return nil, false
-		}
-		return v, true
+// listElements returns the elements of a value classified as a list.
+func listElements(value interface{}) []interface{} {
+	if v, ok := value.([]interface{}); ok {
+		return v
 	}
-	rv := reflect.Indirect(reflect.ValueOf(value))
-	switch rv.Kind() {
-	case reflect.Slice:
-		if rv.IsNil() {
-			return nil, false
-		}
-	case reflect.Array:
-	default:
-		return nil, false
-	}
+	rv := indirect(reflect.ValueOf(value))
 	elements := make([]interface{}, rv.Len())
 	for i := range elements {
 		elements[i] = rv.Index(i).Interface()
 	}
-	return elements, true
+	return elements
+}
+
+// firstElement returns the first element of a value classified as a list, if it has one.
+func firstElement(value interface{}) (interface{}, bool) {
+	if v, ok := value.([]interface{}); ok {
+		if len(v) == 0 {
+			return nil, false
+		}
+		return v[0], true
+	}
+	rv := indirect(reflect.ValueOf(value))
+	if rv.Len() == 0 {
+		return nil, false
+	}
+	return rv.Index(0).Interface(), true
+}
+
+// indirect follows pointers to the value they point at. classify has already ruled out nil ones.
+func indirect(rv reflect.Value) reflect.Value {
+	for rv.Kind() == reflect.Ptr {
+		rv = rv.Elem()
+	}
+	return rv
 }
 
 // removeDuplicates keeps the first occurrence of each type string. An element that is an object

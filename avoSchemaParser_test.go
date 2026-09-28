@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -177,6 +178,31 @@ func TestExtractSchema_NonObjectInputIsEmpty(t *testing.T) {
 	for _, input := range []interface{}{nil, "str", 3, []interface{}{1}, map[string]interface{}(nil), OrderedMap(nil)} {
 		if schema := extractSchema(input); schema == nil || len(schema) != 0 {
 			t.Errorf("input %#v: expected empty non-nil schema, got %#v", input, schema)
+		}
+	}
+}
+
+// Each value is classified once and its keys or elements are copied only when the parser descends
+// into it. Typed maps and slices go through reflection, where the older parser copied them two or
+// three times: these inputs took 526 and 866 allocations then, and take 276 and 606 now.
+func TestExtractSchema_MaterializesEachValueOnce(t *testing.T) {
+	typed := map[string]map[string]int{}
+	lists := map[string][]map[string]int{}
+	for i := 0; i < 10; i++ {
+		inner := map[string]int{}
+		for j := 0; j < 10; j++ {
+			inner[fmt.Sprint(j)] = j
+		}
+		typed[fmt.Sprint(i)] = inner
+		lists[fmt.Sprint(i)] = []map[string]int{inner, inner}
+	}
+	for _, tc := range []struct {
+		name  string
+		input interface{}
+		limit float64
+	}{{"typed maps", typed, 350}, {"lists of typed maps", lists, 700}} {
+		if allocs := testing.AllocsPerRun(20, func() { extractSchema(tc.input) }); allocs > tc.limit {
+			t.Errorf("%s: %v allocations, want at most %v", tc.name, allocs, tc.limit)
 		}
 	}
 }
