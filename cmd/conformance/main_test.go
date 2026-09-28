@@ -36,3 +36,27 @@ func TestHarness_ExitsOneWhenTheEnvelopeWriteFails(t *testing.T) {
 		t.Fatalf("exit code %d, want 1", code)
 	}
 }
+
+// input is required for every operation except sequence, and a missing required field is a
+// configuration error (runner contract, envelope fields and "Exit codes").
+func TestHarness_ExitsTwoWhenInputIsMissing(t *testing.T) {
+	constructor := `"constructor":{"apiKey":"k","env":"dev","version":"1"}`
+	for name, input := range map[string]string{
+		"schema-extraction":    `{"suite":"schema-extraction","fixture_id":"m",` + constructor + `}`,
+		"trackSchemaFromEvent": `{"suite":"s","fixture_id":"m","operation":"trackSchemaFromEvent",` + constructor + `}`,
+	} {
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(input+"\n"), &stdout); code != 2 {
+			t.Errorf("%s: exit code %d, want 2: %s", name, code, stdout.String())
+		}
+	}
+}
+
+// extractSchema passes an explicit null input through (runner contract, fixture-8).
+func TestHarness_AcceptsNullInputForExtractSchema(t *testing.T) {
+	input := `{"suite":"schema-extraction","fixture_id":"n","constructor":{"apiKey":"k","env":"dev","version":"1"},"input":null}` + "\n"
+	var stdout bytes.Buffer
+	if code := run(strings.NewReader(input), &stdout); code != 0 {
+		t.Fatalf("exit code %d: %s", code, stdout.String())
+	}
+}

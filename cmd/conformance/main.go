@@ -93,15 +93,20 @@ func run(stdin io.Reader, stdout io.Writer) int {
 		operation = "extractSchema"
 	}
 
+	// input is required except for sequence; an explicit null is present (fixture-8).
+	input, hasInput := get(envelope, "input")
+	if !hasInput && (operation == "extractSchema" || operation == "trackSchemaFromEvent") {
+		writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "missing input")
+		return 2
+	}
+
 	var actual interface{}
 	outcome := "resolve"
 	switch operation {
 	case "extractSchema":
-		input, _ := get(envelope, "input")
 		properties, _ := input.(avoinspector.OrderedMap)
 		actual = inspector.ExtractOrderedSchema(properties)
 	case "trackSchemaFromEvent":
-		input, _ := get(envelope, "input")
 		inputMap, _ := input.(avoinspector.OrderedMap)
 		actual, outcome = track(inspector, inputMap)
 	case "sequence":
