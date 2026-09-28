@@ -154,7 +154,7 @@ func extractSchema(eventProperties interface{}) []Property {
 	if classify(eventProperties) != kindObject {
 		return []Property{}
 	}
-	return (&schemaParser{}).enterObject(eventProperties, 0)
+	return (&schemaParser{}).enterObject(eventProperties, identity(eventProperties), 0)
 }
 
 // schemaParser holds the identities of the maps and slices on the path from the root to the value
@@ -308,49 +308,50 @@ func propValueType(value interface{}, kind valueKind) string {
 	}
 }
 
-// isLeaf reports whether a complex value is reported without descending into it: past the
-// depth cap (SPEC.md §9.3.2), or when it is one of its own ancestors.
-func (p *schemaParser) isLeaf(value interface{}, kind valueKind, depth int) bool {
+// visit decides how a complex value is mapped. It is a leaf, reported without descending into it,
+// when it is past the depth cap (SPEC.md §9.3.2) or is one of its own ancestors. Otherwise it
+// returns the value's identity, computed once, to put on the ancestor path while descending.
+func (p *schemaParser) visit(value interface{}, kind valueKind, depth int) (leaf bool, id nodeIdentity) {
 	if kind != kindObject && kind != kindList {
-		return false
+		return false, nodeIdentity{}
 	}
 	if depth >= maxSchemaDepth {
-		return true
+		return true, nodeIdentity{}
 	}
-	id, ok := identity(value)
-	if !ok {
-		return false
+	id = identity(value)
+	if id.typ == nil {
+		return false, id
 	}
 	for _, ancestor := range p.ancestors {
 		if ancestor == id {
-			return true
+			return true, id
 		}
 	}
-	return false
+	return false, id
 }
 
-// enterObject maps an object value with that value on the ancestor path.
-func (p *schemaParser) enterObject(value interface{}, depth int) []Property {
-	pushed := p.push(value)
+// enterObject maps an object value with its identity on the ancestor path.
+func (p *schemaParser) enterObject(value interface{}, id nodeIdentity, depth int) []Property {
+	pushed := p.push(id)
 	result := p.mapObject(objectEntries(value), depth)
 	p.pop(pushed)
 	return result
 }
 
-// enterList maps a list value with that value on the ancestor path.
-func (p *schemaParser) enterList(value interface{}, depth int) []interface{} {
-	pushed := p.push(value)
+// enterList maps a list value with its identity on the ancestor path.
+func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) []interface{} {
+	pushed := p.push(id)
 	result := p.mapList(listElements(value), depth)
 	p.pop(pushed)
 	return result
 }
 
-func (p *schemaParser) push(value interface{}) bool {
-	id, ok := identity(value)
-	if ok {
-		p.ancestors = append(p.ancestors, id)
+func (p *schemaParser) push(id nodeIdentity) bool {
+	if id.typ == nil {
+		return false
 	}
-	return ok
+	p.ancestors = append(p.ancestors, id)
+	return true
 }
 
 func (p *schemaParser) pop(pushed bool) {
@@ -364,14 +365,15 @@ func (p *schemaParser) mapObject(entries []KeyValue, depth int) []Property {
 	for _, entry := range entries {
 		kind := classify(entry.Value)
 		property := Property{PropertyName: entry.Key, PropertyType: propValueType(entry.Value, kind)}
+		leaf, id := p.visit(entry.Value, kind, depth)
 		switch {
-		case p.isLeaf(entry.Value, kind, depth):
+		case leaf:
 			property.PropertyType = "object"
 			property.Children = []Property{}
 		case kind == kindObject:
-			property.Children = p.enterObject(entry.Value, depth+1)
+			property.Children = p.enterObject(entry.Value, id, depth+1)
 		case kind == kindList:
-			property.ListChildren = p.enterList(entry.Value, depth+1)
+			property.ListChildren = p.enterList(entry.Value, id, depth+1)
 		}
 		result = append(result, property)
 	}
@@ -384,13 +386,14 @@ func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} 
 	mapped := make([]interface{}, 0, len(elements))
 	for _, element := range elements {
 		kind := classify(element)
+		leaf, id := p.visit(element, kind, depth)
 		switch {
-		case p.isLeaf(element, kind, depth):
+		case leaf:
 			mapped = append(mapped, "object")
 		case kind == kindObject:
-			mapped = append(mapped, p.enterObject(element, depth+1))
+			mapped = append(mapped, p.enterObject(element, id, depth+1))
 		case kind == kindList:
-			mapped = append(mapped, p.enterList(element, depth+1))
+			mapped = append(mapped, p.enterList(element, id, depth+1))
 		default:
 			mapped = append(mapped, basicTypeName(kind))
 		}
@@ -398,26 +401,27 @@ func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} 
 	return removeDuplicates(mapped)
 }
 
-// identity returns what identifies a map, slice or OrderedMap for cycle detection, or false for
-// values that cannot contain themselves (arrays held by value, empty slices).
-func identity(value interface{}) (nodeIdentity, bool) {
+// identity returns what identifies a map, slice or OrderedMap for cycle detection. It returns the
+// zero nodeIdentity (typ == nil) for values that cannot contain themselves: arrays held by value,
+// empty slices, and scalars.
+func identity(value interface{}) nodeIdentity {
 	rv := reflect.ValueOf(value)
 	for rv.Kind() == reflect.Ptr {
 		if rv.Elem().Kind() == reflect.Array {
-			return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}, true
+			return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}
 		}
 		rv = rv.Elem()
 	}
 	switch rv.Kind() {
 	case reflect.Map:
-		return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}, true
+		return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}
 	case reflect.Slice:
 		if rv.Len() == 0 {
-			return nodeIdentity{}, false
+			return nodeIdentity{}
 		}
-		return nodeIdentity{pointer: rv.Pointer(), length: rv.Len(), typ: rv.Type()}, true
+		return nodeIdentity{pointer: rv.Pointer(), length: rv.Len(), typ: rv.Type()}
 	default:
-		return nodeIdentity{}, false
+		return nodeIdentity{}
 	}
 }
 

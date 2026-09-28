@@ -160,14 +160,14 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 
 	env := options.Env
 	if env != Dev && env != Staging && env != Prod {
-		logWarning("Invalid env %q, falling back to \"dev\".", string(env))
+		logAlways("Invalid env %q, falling back to \"dev\".", string(env))
 		env = Dev
 	}
 	shouldLog.Store(env == Dev)
 
 	batchSize := defaultBatchSize
 	if options.BatchSize < 0 {
-		logWarning("Invalid batchSize %d; using default %d.", options.BatchSize, defaultBatchSize)
+		logAlways("Invalid batchSize %d; using default %d.", options.BatchSize, defaultBatchSize)
 	} else if options.BatchSize > 0 {
 		batchSize = options.BatchSize
 	}
@@ -177,23 +177,23 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 	batchFlushSeconds := defaultBatchFlushSeconds
 	switch {
 	case options.BatchFlushSeconds < 0 || math.IsNaN(options.BatchFlushSeconds):
-		logWarning("Invalid batchFlushSeconds %v; using default %v.", options.BatchFlushSeconds, defaultBatchFlushSeconds)
+		logAlways("Invalid batchFlushSeconds %v; using default %v.", options.BatchFlushSeconds, defaultBatchFlushSeconds)
 	case options.BatchFlushSeconds > maxBatchFlushSeconds:
 		// Larger values overflow the timer's time.Duration.
-		logWarning("batchFlushSeconds %v is above the maximum; using %v (24 hours).", options.BatchFlushSeconds, maxBatchFlushSeconds)
+		logAlways("batchFlushSeconds %v is above the maximum; using %v (24 hours).", options.BatchFlushSeconds, maxBatchFlushSeconds)
 		batchFlushSeconds = maxBatchFlushSeconds
 	case options.BatchFlushSeconds > 0:
 		batchFlushSeconds = options.BatchFlushSeconds
 	}
 	maxQueueSize := defaultMaxQueueSize
 	if options.MaxQueueSize < 0 {
-		logWarning("Invalid maxQueueSize %d; using default %d.", options.MaxQueueSize, defaultMaxQueueSize)
+		logAlways("Invalid maxQueueSize %d; using default %d.", options.MaxQueueSize, defaultMaxQueueSize)
 	} else if options.MaxQueueSize > 0 {
 		maxQueueSize = options.MaxQueueSize
 	}
 	// Not clamped: conformance fixture batch-4 requires FIFO overflow in this case.
 	if batchSize > maxQueueSize {
-		logWarning("batchSize %d is larger than maxQueueSize %d, so a batch never fills: events are sent "+
+		logAlways("batchSize %d is larger than maxQueueSize %d, so a batch never fills: events are sent "+
 			"only by the scheduled flush or Flush, and the oldest are dropped once %d are buffered. "+
 			"Set BatchSize to at most MaxQueueSize.", batchSize, maxQueueSize, maxQueueSize)
 	}
@@ -246,7 +246,7 @@ func (inspector *AvoInspector) ExtractOrderedSchema(eventProperties OrderedMap) 
 func safeExtractSchema(eventProperties interface{}) (schema []Property) {
 	defer func() {
 		if r := recover(); r != nil {
-			logError("extractSchema error: %v", r)
+			logAlways("extractSchema error: %v", r)
 			schema = []Property{}
 		}
 	}()
@@ -287,7 +287,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 
 	defer func() {
 		if r := recover(); r != nil {
-			logError("internal error: %v", r)
+			logAlways("internal error: %v", r)
 			schema, err = nil, errors.New(internalErrorMessage)
 		}
 	}()
@@ -295,7 +295,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	schema = safeExtractSchema(eventProperties)
 	streamId := options.StreamId
 	if strings.Contains(streamId, ":") {
-		logWarning("streamId contains ':'; using the value verbatim.")
+		logAlways("streamId contains ':'; using the value verbatim.")
 	}
 	logIfEnabled("supplied event %q", eventName)
 
@@ -426,7 +426,7 @@ func (inspector *AvoInspector) startSend(send *inFlightSend) <-chan sendResult {
 		case sendFailed:
 			// A send abandoned by Destroy is not a failure.
 			if !errors.Is(res.err, errRequestAborted) {
-				logError("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
+				logAlways("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
 			}
 		}
 		result <- res
@@ -568,14 +568,9 @@ func logf(format string, args ...interface{}) {
 	fmt.Fprintf(logOutput, logPrefix+format+"\n", args...)
 }
 
-// logWarning always writes; warnings flag caller mistakes (SPEC.md §4.2, §6.3).
-func logWarning(format string, args ...interface{}) {
-	logf(format, args...)
-}
-
-// logError always writes, whatever the logging flag: it reports network errors, timeouts,
-// refused sends and internal errors (SPEC.md §4.2, §7.5).
-func logError(format string, args ...interface{}) {
+// logAlways writes whatever the logging flag: warnings about caller mistakes (SPEC.md §4.2,
+// §6.3) and reports of network errors, timeouts, refused sends and internal errors (§4.2, §7.5).
+func logAlways(format string, args ...interface{}) {
 	logf(format, args...)
 }
 
