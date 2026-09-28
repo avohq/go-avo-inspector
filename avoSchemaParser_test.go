@@ -250,3 +250,21 @@ func TestExtractSchema_SelfReferenceUnderManyKeysIsFast(t *testing.T) {
 		t.Fatal("extracting a self-referencing map did not finish")
 	}
 }
+
+// Depth counts one level per container, object or list, as in C# and Node: a list of objects
+// costs two levels. The expected values are the C# and Node output for the same inputs.
+func TestExtractSchema_DepthMatchesReferenceSDKs(t *testing.T) {
+	var nested interface{} = 1
+	for i := 0; i < 11; i++ {
+		nested = list{nested}
+	}
+	assertSchemaJSON(t, extractSchema(om{{"a", nested}}),
+		`[{"propertyName":"a","propertyType":"list(object)","children":[[[[[[[[[["object"]]]]]]]]]]}]`)
+
+	var objects interface{} = om{{"leaf", 1}}
+	for i := 6; i >= 1; i-- {
+		objects = om{{fmt.Sprintf("l%d", i), list{objects}}}
+	}
+	assertSchemaJSON(t, extractSchema(objects),
+		`[{"propertyName":"l1","propertyType":"list(object)","children":[[{"propertyName":"l2","propertyType":"list(object)","children":[[{"propertyName":"l3","propertyType":"list(object)","children":[[{"propertyName":"l4","propertyType":"list(object)","children":[[{"propertyName":"l5","propertyType":"list(object)","children":[[{"propertyName":"l6","propertyType":"object","children":[]}]]}]]}]]}]]}]]}]`)
+}
