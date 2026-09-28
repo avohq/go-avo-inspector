@@ -91,7 +91,8 @@ avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Option
 ```
 
 A zero `BatchSize`, `BatchFlushSeconds` or `MaxQueueSize` means "use the default", without a warning.
-A negative value is invalid: it logs a warning and the default is used.
+A negative value is invalid: it logs a warning and the default is used. `BatchFlushSeconds` above
+86400 (24 hours) is capped at 86400 with a warning.
 
 ## Enabling logs
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ const (
 const (
 	defaultBatchSize         = 30
 	defaultBatchFlushSeconds = 30.0
+	maxBatchFlushSeconds     = 24 * 60 * 60.0
 	defaultMaxQueueSize      = 1000
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
@@ -64,7 +66,7 @@ type Options struct {
 	// Dev, where every event is sent immediately.
 	BatchSize int
 	// BatchFlushSeconds is the longest an event waits in the pending batch before the scheduled
-	// flush sends it. Default 30.
+	// flush sends it. Default 30; values above 86400 (24 hours) are capped with a warning.
 	BatchFlushSeconds float64
 	// MaxQueueSize caps the pending batch; on overflow the oldest events are dropped. Default 1000.
 	// A BatchSize above it is kept but logs a warning, since such a batch never fills.
@@ -161,9 +163,14 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		batchSize = 1
 	}
 	batchFlushSeconds := defaultBatchFlushSeconds
-	if options.BatchFlushSeconds < 0 {
+	switch {
+	case options.BatchFlushSeconds < 0 || math.IsNaN(options.BatchFlushSeconds):
 		logWarning("Invalid batchFlushSeconds %v; using default %v.", options.BatchFlushSeconds, defaultBatchFlushSeconds)
-	} else if options.BatchFlushSeconds > 0 {
+	case options.BatchFlushSeconds > maxBatchFlushSeconds:
+		// Larger values overflow the timer's time.Duration.
+		logWarning("batchFlushSeconds %v is above the maximum; using %v (24 hours).", options.BatchFlushSeconds, maxBatchFlushSeconds)
+		batchFlushSeconds = maxBatchFlushSeconds
+	case options.BatchFlushSeconds > 0:
 		batchFlushSeconds = options.BatchFlushSeconds
 	}
 	maxQueueSize := defaultMaxQueueSize

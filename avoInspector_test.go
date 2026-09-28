@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -651,5 +652,38 @@ func TestNewAvoInspector_WarnsWhenBatchSizeExceedsMaxQueueSize(t *testing.T) {
 	mustInspector(t, Options{Env: Dev, BatchSize: 30, MaxQueueSize: 2})
 	if strings.Contains(quiet(), "larger than maxQueueSize") {
 		t.Errorf("no warning expected when the batch fits or in dev, got %q", quiet())
+	}
+}
+
+// A huge or infinite BatchFlushSeconds is capped at 24 hours with a warning, instead of
+// overflowing the timer duration into an immediate flush. NaN is invalid and uses the default.
+func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
+	testCases := []struct {
+		value    float64
+		expected float64
+	}{
+		{math.Inf(1), maxBatchFlushSeconds},
+		{1e300, maxBatchFlushSeconds},
+		{1e10, maxBatchFlushSeconds},
+		{math.NaN(), defaultBatchFlushSeconds},
+	}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprint(tc.value), func(t *testing.T) {
+			server := newTestServer(t, nil)
+			logs := captureLogs(t)
+			inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: tc.value})
+			inspector.EnableLogging(false)
+			if inspector.batchFlushSeconds != tc.expected {
+				t.Errorf("expected batchFlushSeconds %v, got %v", tc.expected, inspector.batchFlushSeconds)
+			}
+			if !strings.Contains(logs(), "batchFlushSeconds") {
+				t.Errorf("expected a warning, got %q", logs())
+			}
+			_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+			time.Sleep(200 * time.Millisecond)
+			if n := len(server.captured()); n != 0 {
+				t.Errorf("the timer fired early: %d requests", n)
+			}
+		})
 	}
 }
