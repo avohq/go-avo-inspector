@@ -492,3 +492,39 @@ func TestLogging_Non200IsLoggedOnlyWhenEnabled(t *testing.T) {
 		}
 	}
 }
+
+// Flush(0) sends the pending events without waiting for them, as Node and Java do; a negative
+// timeout waits up to DefaultFlushTimeout.
+func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
+	release := make(chan struct{})
+	server := newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
+	defer close(release)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	start := time.Now()
+	if err := inspector.Flush(0); err != ErrFlushTimeout {
+		t.Errorf("expected ErrFlushTimeout while the send is still in flight, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("Flush(0) waited %v", elapsed)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(server.captured()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(server.captured()); n != 1 {
+		t.Errorf("Flush(0) must still send the pending batch, got %d requests", n)
+	}
+}
+
+func TestFlush_NegativeWaitsForInFlightSends(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	if err := inspector.Flush(-1); err != nil {
+		t.Errorf("expected nil, got %v", err)
+	}
+	if n := len(server.captured()); n != 1 {
+		t.Errorf("expected the send to have completed, got %d requests", n)
+	}
+}

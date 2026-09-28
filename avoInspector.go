@@ -27,7 +27,6 @@ const (
 	defaultBatchSize         = 30
 	defaultBatchFlushSeconds = 30.0
 	defaultMaxQueueSize      = 1000
-	defaultFlushTimeout      = 10 * time.Second
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
 	apiKeyControlMessage = "[Avo Inspector] API key contains a control character. The API key is sent as a request header and cannot contain CR, LF, or NUL."
@@ -35,6 +34,10 @@ const (
 	internalErrorMessage = "Avo Inspector: something went wrong. Please report to support@avo.app."
 	logPrefix            = "[Avo Inspector] "
 )
+
+// DefaultFlushTimeout is how long Flush waits for in-flight sends when given a negative timeout,
+// and a sensible value to pass before the process exits.
+const DefaultFlushTimeout = 10 * time.Second
 
 // ErrFlushTimeout is returned by Flush when in-flight sends had not finished within the timeout.
 // It is informational: the pending events were still sent, the instance stays usable, and callers
@@ -384,14 +387,15 @@ func (inspector *AvoInspector) dispatch(batch []wireEvent) <-chan sendResult {
 }
 
 // Flush sends every pending event and waits until all in-flight sends have completed, or until
-// timeout (10 seconds when timeout <= 0) has passed. Flush always completes (SPEC.md §4.6): the
+// timeout has passed. Flush(0) sends without waiting; a negative timeout means DefaultFlushTimeout
+// (10 seconds). Flush always completes (SPEC.md §4.6): the
 // returned error is informational and callers may ignore it. It is ErrFlushTimeout when the timeout
 // passed first and nil otherwise; either way the pending events were sent and the inspector stays
 // usable. Delivery failures are not reported. Call Flush before the process or serverless handler
 // exits: pending events are otherwise lost.
 func (inspector *AvoInspector) Flush(timeout time.Duration) error {
-	if timeout <= 0 {
-		timeout = defaultFlushTimeout
+	if timeout < 0 {
+		timeout = DefaultFlushTimeout
 	}
 	inspector.mu.Lock()
 	if inspector.destroyed {
@@ -413,12 +417,22 @@ func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 	}
 	inspector.mu.Unlock()
 
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	deadline := time.Now().Add(timeout)
 	for _, done := range waiting {
 		select {
 		case <-done:
-		case <-deadline.C:
+			continue
+		default:
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return ErrFlushTimeout
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-done:
+			timer.Stop()
+		case <-timer.C:
 			return ErrFlushTimeout
 		}
 	}

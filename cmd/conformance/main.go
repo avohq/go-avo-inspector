@@ -222,7 +222,7 @@ func runSequence(inspector *avoinspector.AvoInspector, envelope avoinspector.Ord
 			wg.Wait()
 			records = append(records, stepRecord{"trackN", "resolve", int(count)})
 		case "flush":
-			timeout := time.Duration(0)
+			timeout := avoinspector.DefaultFlushTimeout
 			if ms, ok := getNumber(step, "timeoutMs"); ok {
 				timeout = time.Duration(ms * float64(time.Millisecond))
 			}

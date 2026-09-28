@@ -135,13 +135,14 @@ exits first, so call `Flush` before the process exits, and in serverless functio
 handler returns:
 
 ```go
-avoInspector.Flush(0) // sends pending events and waits up to 10 seconds (the default for 0)
+avoInspector.Flush(avoinspector.DefaultFlushTimeout) // sends pending events and waits up to 10 seconds
 ```
 
 `Flush` always completes: it sends the pending events and waits for in-flight sends. Its error is
 informational and you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
 when the timeout passed, and `nil` otherwise; in both cases the pending events were sent and the
-inspector stays usable. Delivery failures are never reported.
+inspector stays usable. Delivery failures are never reported. `Flush(0)` sends the pending events
+without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
 background flush. After `Destroy`, tracking calls send nothing. Call `Destroy` when you are done with
