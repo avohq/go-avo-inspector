@@ -632,3 +632,24 @@ func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
 		t.Errorf("Flush returned before the taken batch was sent: %d requests captured", n)
 	}
 }
+
+// A batch size above the queue cap can never trigger a send, so the constructor always warns. The
+// size is not clamped, as in Node: batch-4 requires FIFO overflow into a single flushed batch.
+func TestNewAvoInspector_WarnsWhenBatchSizeExceedsMaxQueueSize(t *testing.T) {
+	logs := captureLogs(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	if !strings.Contains(logs(), "batchSize 30 is larger than maxQueueSize 2") {
+		t.Errorf("expected a warning, got %q", logs())
+	}
+	if inspector.batchSize != 30 {
+		t.Errorf("batchSize must not be clamped, got %d", inspector.batchSize)
+	}
+
+	quiet := captureLogs(t)
+	mustInspector(t, Options{Env: Staging, BatchSize: 2, MaxQueueSize: 2})
+	mustInspector(t, Options{Env: Dev, BatchSize: 30, MaxQueueSize: 2})
+	if strings.Contains(quiet(), "larger than maxQueueSize") {
+		t.Errorf("no warning expected when the batch fits or in dev, got %q", quiet())
+	}
+}

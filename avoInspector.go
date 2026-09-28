@@ -67,6 +67,7 @@ type Options struct {
 	// flush sends it. Default 30.
 	BatchFlushSeconds float64
 	// MaxQueueSize caps the pending batch; on overflow the oldest events are dropped. Default 1000.
+	// A BatchSize above it is kept but logs a warning, since such a batch never fills.
 	MaxQueueSize int
 	// DisableBatchTimer turns off the scheduled flush, leaving the size trigger and Flush. Set it
 	// in serverless deployments.
@@ -170,6 +171,12 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		logWarning("Invalid maxQueueSize %d; using default %d.", options.MaxQueueSize, defaultMaxQueueSize)
 	} else if options.MaxQueueSize > 0 {
 		maxQueueSize = options.MaxQueueSize
+	}
+	// Not clamped: conformance fixture batch-4 requires FIFO overflow in this case.
+	if batchSize > maxQueueSize {
+		logWarning("batchSize %d is larger than maxQueueSize %d, so a batch never fills: events are sent "+
+			"only by the scheduled flush or Flush, and the oldest are dropped once %d are buffered. "+
+			"Set BatchSize to at most MaxQueueSize.", batchSize, maxQueueSize, maxQueueSize)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
