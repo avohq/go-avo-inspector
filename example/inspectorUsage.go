@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	avoinspector "github.com/avohq/go-avo-inspector"
+	avoinspector "github.com/avohq/go-avo-inspector/v2"
 )
 
 func main() {
@@ -19,6 +19,8 @@ func main() {
 	}
 
 	avoInspector, _ := avoinspector.NewAvoInspector("_", avoinspector.Dev, "1.0", "my app")
+	// Send anything still buffered before main returns; buffered events are lost at exit.
+	defer avoInspector.Flush(avoinspector.DefaultFlushTimeout)
 
 	call, _ := avoInspector.TrackSchemaFromEvent("Test Event", data)
 

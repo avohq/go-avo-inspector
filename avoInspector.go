@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/avohq/go-avo-inspector/internal/testhooks"
+	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
 type AvoInspectorEnv string

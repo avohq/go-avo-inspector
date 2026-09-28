@@ -9,7 +9,7 @@ This is a quick start guide. For more information about the Inspector project pl
 ## Installation
 
 ```
-go get github.com/avohq/go-avo-inspector
+go get github.com/avohq/go-avo-inspector/v2
 ```
 
 ## Initialization
@@ -18,7 +18,7 @@ Obtain the API key at [Avo.app](https://www.avo.app/welcome)
 
 ```go
 import (
-	avoinspector "github.com/avohq/go-avo-inspector"
+	avoinspector "github.com/avohq/go-avo-inspector/v2"
 )
 
 avoInspector, err := avoinspector.NewAvoInspector(
@@ -88,12 +88,12 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 })
 ```
 
-`TrackSchemaFromEvent` returns the extracted schema. Since 1.1.0 its `error` only reports an
-internal failure before the event was queued; it is never an HTTP or network failure. Delivery
-failures are logged (when logging is enabled) and the event is dropped, without retry. In `Dev`,
+`TrackSchemaFromEvent` returns the extracted schema. Since v2 its `error` only reports an
+internal failure before the event was queued; it is never an HTTP or network failure. A failed
+send is logged and its events are dropped, without retry. In `Dev`,
 where every event is sent before the call returns, a non-200 response returns an empty schema.
 
-Before 1.1.0 every call sent the event synchronously and returned the HTTP failure as `error`. Now
+In v1 every call sent the event synchronously and returned the HTTP failure as `error`. Now
 events are batched (except in `Dev`) and sent in the background, so you must call `Flush` before
 the process exits (see below).
 
@@ -149,10 +149,14 @@ without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
 background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine
 or timer, so one you stop using after a `Flush` is garbage-collected even without `Destroy`.
 
-## Upgrading from v1.0.0
+## Upgrading from v1 to v2
 
-v1.1.0 keeps every v1.0.0 function and type, so existing code compiles unchanged. These are the
-behaviour changes you may notice:
+- **The import path changed.** Following Go's module rule for major versions, v2 lives at
+  `github.com/avohq/go-avo-inspector/v2`. Run `go get github.com/avohq/go-avo-inspector/v2` and
+  change your imports to that path. The package name is still `avoinspector`.
+
+Apart from the import path, every v1.0.0 function and type still exists with the same signature.
+These are the behaviour changes you may notice:
 
 - **List children moved.** A list property's element schemas are now in `Property.ListChildren`, in
   the spec's shape (type strings, nested schemas, nested lists). `Property.Children` now holds only
@@ -185,7 +189,7 @@ behaviour changes you may notice:
   `api-key`, `env` and `X-Avo-Client` headers and `Content-Type: application/json`, gzipped when
   1024 bytes or larger. Each event is one element of the body. The separate `sessionStarted`
   element and the `sessionId`, `trackingId`, `avoFunction`, `eventId` and `eventHash` fields are no
-  longer sent. `createdAt` has millisecond precision and `libVersion` is `1.1.0`.
+  longer sent. `createdAt` has millisecond precision and `libVersion` is `2.0.0`.
 
 ## Conformance
 
@@ -196,7 +200,8 @@ local checkout instead.
 
 ## Releasing
 
-Update the `Version` constant in `version.go` on every release; it is sent as `libVersion`.
+Update the `Version` constant in `version.go` on every release; it is sent as `libVersion`. Release
+tags must match the module's major version: v2 releases are tagged `v2.x.y`, starting with `v2.0.0`.
 
 ## Author
 

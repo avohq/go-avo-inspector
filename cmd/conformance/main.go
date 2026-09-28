@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	avoinspector "github.com/avohq/go-avo-inspector"
-	"github.com/avohq/go-avo-inspector/internal/testhooks"
+	avoinspector "github.com/avohq/go-avo-inspector/v2"
+	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
 // HarnessContractVersion is the version of conformance/runner-contract.md this harness implements.
