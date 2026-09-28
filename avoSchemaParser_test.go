@@ -287,3 +287,30 @@ func TestExtractSchema_DepthMatchesReferenceSDKs(t *testing.T) {
 	assertSchemaJSON(t, extractSchema(objects),
 		`[{"propertyName":"l1","propertyType":"list(object)","children":[[{"propertyName":"l2","propertyType":"list(object)","children":[[{"propertyName":"l3","propertyType":"list(object)","children":[[{"propertyName":"l4","propertyType":"list(object)","children":[[{"propertyName":"l5","propertyType":"list(object)","children":[[{"propertyName":"l6","propertyType":"object","children":[]}]]}]]}]]}]]}]]}]`)
 }
+
+type namedOrderedMap OrderedMap
+type namedKeyValues []KeyValue
+
+// A pointer to an OrderedMap, a named type whose underlying type is []KeyValue, and a bare
+// []KeyValue are objects, at the top level and nested.
+func TestExtractSchema_OrderedMapVariantsAreObjects(t *testing.T) {
+	pointer := &OrderedMap{{"b", 1}, {"a", "x"}}
+	expected := `[{"propertyName":"b","propertyType":"int"},{"propertyName":"a","propertyType":"string"}]`
+	for name, input := range map[string]interface{}{
+		"pointer":       pointer,
+		"named":         namedOrderedMap{{"b", 1}, {"a", "x"}},
+		"named slice":   namedKeyValues{{"b", 1}, {"a", "x"}},
+		"bare":          []KeyValue{{"b", 1}, {"a", "x"}},
+		"pointer named": &namedKeyValues{{"b", 1}, {"a", "x"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertSchemaJSON(t, extractSchema(input), expected)
+			assertSchemaJSON(t, extractSchema(om{{"nested", input}, {"list", list{input}}}),
+				`[{"propertyName":"nested","propertyType":"object","children":`+expected+`},`+
+					`{"propertyName":"list","propertyType":"list(object)","children":[`+expected+`]}]`)
+		})
+	}
+	var nilPointer *OrderedMap
+	assertSchemaJSON(t, extractSchema(om{{"nil", nilPointer}, {"nilNamed", namedKeyValues(nil)}}),
+		`[{"propertyName":"nil","propertyType":"null"},{"propertyName":"nilNamed","propertyType":"null"}]`)
+}

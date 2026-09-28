@@ -67,7 +67,8 @@ type KeyValue struct {
 // OrderedMap is an event-property object whose entries keep the order they were given in. Go maps
 // have no order, so a schema extracted from a map[string]interface{} lists its properties sorted by
 // key; use an OrderedMap (at the top level or as any nested value) to control the order instead.
-// Keys are expected to be unique.
+// Keys are expected to be unique. A pointer to an OrderedMap, a named type based on it, and a bare
+// []KeyValue are read the same way.
 type OrderedMap []KeyValue
 
 // extractSchema extracts the schema of event properties (SPEC.md §9). It accepts nil, a
@@ -166,12 +167,21 @@ func classify(value interface{}) valueKind {
 		if rv.IsNil() {
 			return kindNull
 		}
+		if rv.Type().Elem() == keyValueType {
+			// A *OrderedMap, a named type based on OrderedMap or []KeyValue, or a bare []KeyValue.
+			return kindObject
+		}
 		return kindList
 	case reflect.Array:
 		return kindList
 	}
 	return kindUnknown
 }
+
+var (
+	keyValueType   = reflect.TypeOf(KeyValue{})
+	orderedMapType = reflect.TypeOf(OrderedMap(nil))
+)
 
 // basicTypeName is the SPEC.md §9.2 getBasicPropType: a nested object or list is "object".
 func basicTypeName(kind valueKind) string {
@@ -346,6 +356,9 @@ func objectEntries(value interface{}) []KeyValue {
 		return entries
 	}
 	rv := indirect(reflect.ValueOf(value))
+	if rv.Kind() == reflect.Slice {
+		return rv.Convert(orderedMapType).Interface().(OrderedMap)
+	}
 	keys := rv.MapKeys()
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 	entries := make([]KeyValue, len(keys))
