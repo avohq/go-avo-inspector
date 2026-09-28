@@ -47,7 +47,10 @@ var ErrFlushTimeout = errors.New("Avo Inspector: flush timed out before all in-f
 // shouldLog is the process-wide logging flag (SPEC.md §4.4).
 var shouldLog atomic.Bool
 
-// Options configures an AvoInspector (SPEC.md §4.1, §5). Zero values select the defaults.
+// Options configures an AvoInspector (SPEC.md §4.1, §5).
+//
+// A zero BatchSize, BatchFlushSeconds or MaxQueueSize means "use the default", silently. A
+// negative value is invalid: it logs a warning and the default is used.
 type Options struct {
 	// ApiKey is the Inspector API key. Required.
 	ApiKey string
