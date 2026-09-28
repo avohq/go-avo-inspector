@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"strings"
@@ -264,18 +265,14 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	if strings.Contains(streamId, ":") {
 		logWarning("streamId contains ':'; using the value verbatim.")
 	}
-	if shouldLog.Load() {
-		logf("supplied event %q", eventName)
-	}
+	logIfEnabled("supplied event %q", eventName)
 
 	inspector.mu.Lock()
 	samplingRate := inspector.samplingRate
 	inspector.mu.Unlock()
 	// SPEC.md §7.7: per-event sampling at enqueue.
 	if rand.Float64() > samplingRate {
-		if shouldLog.Load() {
-			logf("event %q dropped due to sampling rate.", eventName)
-		}
+		logIfEnabled("event %q dropped due to sampling rate.", eventName)
 		return schema, nil
 	}
 
@@ -300,7 +297,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	inspector.mu.Unlock()
 
 	if dropped > 0 {
-		logError("maxQueueSize exceeded; dropped %d oldest event(s).", dropped)
+		logIfEnabled("maxQueueSize exceeded; dropped %d oldest event(s).", dropped)
 	}
 	if batch == nil {
 		return schema, nil
@@ -372,13 +369,13 @@ func (inspector *AvoInspector) dispatch(batch []wireEvent) <-chan sendResult {
 		}
 		delete(inspector.inFlight, id)
 		inspector.mu.Unlock()
+		// SPEC.md §7.5, §12.5: a failed batch is logged and dropped, never re-queued or retried.
 		switch res.status {
 		case sendOk:
-			if shouldLog.Load() {
-				logf("sent %d event(s).", len(batch))
-			}
+			logIfEnabled("sent %d event(s).", len(batch))
+		case sendNon200:
+			logIfEnabled("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
 		default:
-			// SPEC.md §7.5, §12.5: log and drop; never re-queue or retry.
 			logError("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
 		}
 		result <- res
@@ -481,8 +478,18 @@ func (inspector *AvoInspector) setSamplingRate(rate float64) {
 	inspector.mu.Unlock()
 }
 
+// logOutput receives every log line; tests swap it under logMu.
+var (
+	logMu     sync.Mutex
+	logOutput io.Writer = os.Stderr
+)
+
+// Log helpers. None of them may be passed the apiKey (SPEC.md §7.5.1).
+
 func logf(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, logPrefix+format+"\n", args...)
+	logMu.Lock()
+	defer logMu.Unlock()
+	fmt.Fprintf(logOutput, logPrefix+format+"\n", args...)
 }
 
 // logWarning always writes; warnings flag caller mistakes (SPEC.md §4.2, §6.3).
@@ -490,8 +497,15 @@ func logWarning(format string, args ...interface{}) {
 	logf(format, args...)
 }
 
-// logError writes only when logging is enabled. Never pass the apiKey (SPEC.md §7.5.1).
+// logError always writes, whatever the logging flag: it reports network errors, timeouts,
+// refused sends and internal errors (SPEC.md §4.2, §7.5).
 func logError(format string, args ...interface{}) {
+	logf(format, args...)
+}
+
+// logIfEnabled writes only when logging is enabled: diagnostics, non-200 responses and
+// maxQueueSize drops.
+func logIfEnabled(format string, args ...interface{}) {
 	if shouldLog.Load() {
 		logf(format, args...)
 	}

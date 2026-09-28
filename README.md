@@ -60,7 +60,9 @@ avoInspector.EnableLogging(true)
 ```
 
 `ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr and never
-include the API key.
+include the API key. Failed sends (network errors, timeouts, a refused send) and internal errors are
+always logged, whatever this setting; everything else, including non-200 responses, is logged only
+when logging is enabled.
 
 ## Sending event schemas
 

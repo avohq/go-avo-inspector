@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -392,5 +393,102 @@ func TestBatching_ConcurrentTracksAreSentExactlyOnce(t *testing.T) {
 	}
 	if total != count || len(seen) != count {
 		t.Errorf("expected %d unique events, got %d events with %d unique messageIds", count, total, len(seen))
+	}
+}
+
+// captureLogs redirects log output for the rest of the test and returns a reader of it.
+func captureLogs(t *testing.T) func() string {
+	t.Helper()
+	buffer := &strings.Builder{}
+	logMu.Lock()
+	previous := logOutput
+	logOutput = buffer
+	logMu.Unlock()
+	t.Cleanup(func() {
+		logMu.Lock()
+		logOutput = previous
+		logMu.Unlock()
+	})
+	return func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return buffer.String()
+	}
+}
+
+// Send failures and internal errors are logged even with logging off, and never include the
+// apiKey (SPEC.md §4.2, §7.5, §7.5.1).
+func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
+	const apiKey = "secret-key-123"
+	newQuietInspector := func(t *testing.T) *AvoInspector {
+		inspector := mustInspector(t, Options{ApiKey: apiKey, Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+		inspector.EnableLogging(false)
+		return inspector
+	}
+	testCases := []struct {
+		name     string
+		setup    func(t *testing.T, inspector *AvoInspector)
+		expected string
+	}{
+		{"network error", func(t *testing.T, _ *AvoInspector) {
+			t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+		}, "Request failed"},
+		{"timeout", func(t *testing.T, inspector *AvoInspector) {
+			release := make(chan struct{})
+			newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
+			t.Cleanup(func() { close(release) })
+			inspector.avoNetworkCallsHandler.client.Timeout = 50 * time.Millisecond
+		}, "Request timed out"},
+		{"header guard", func(t *testing.T, inspector *AvoInspector) {
+			newTestServer(t, nil)
+			inspector.avoNetworkCallsHandler.apiKey = apiKey + "\n"
+		}, errUnsafeHeader.Error()},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			inspector := newQuietInspector(t)
+			tc.setup(t, inspector)
+			_, _ = inspector.TrackSchemaFromEvent("E", nil)
+			_ = inspector.Flush(2 * time.Second)
+			output := logs()
+			if !strings.Contains(output, tc.expected) {
+				t.Errorf("expected a log containing %q, got %q", tc.expected, output)
+			}
+			if strings.Contains(output, apiKey) {
+				t.Errorf("log must not contain the apiKey: %q", output)
+			}
+		})
+	}
+
+	t.Run("internal error", func(t *testing.T) {
+		logs := captureLogs(t)
+		inspector := newQuietInspector(t)
+		previous := newGuid
+		newGuid = func() string { panic("boom") }
+		t.Cleanup(func() { newGuid = previous })
+		schema, err := inspector.TrackSchemaFromEvent("E", nil)
+		if err == nil || err.Error() != internalErrorMessage || schema != nil {
+			t.Fatalf("expected the internal error, got (%#v, %v)", schema, err)
+		}
+		if output := logs(); !strings.Contains(output, "internal error: boom") || strings.Contains(output, apiKey) {
+			t.Errorf("expected an internal error log without the apiKey, got %q", output)
+		}
+	})
+}
+
+// Everything else, including a non-200 response, is logged only when logging is enabled.
+func TestLogging_Non200IsLoggedOnlyWhenEnabled(t *testing.T) {
+	newTestServer(t, respondWith(500, `{}`))
+	for _, enabled := range []bool{false, true} {
+		logs := captureLogs(t)
+		inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+		inspector.EnableLogging(enabled)
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_ = inspector.Flush(2 * time.Second)
+		logged := strings.Contains(logs(), "status 500")
+		if logged != enabled {
+			t.Errorf("logging %v: non-200 logged = %v, output %q", enabled, logged, logs())
+		}
 	}
 }
