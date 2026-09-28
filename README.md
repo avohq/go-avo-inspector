@@ -2,6 +2,10 @@
 
 Implements [avohq/spec-first-inspector-server-sdk](https://github.com/avohq/spec-first-inspector-server-sdk) v3.0.1 (`avoinspector.SpecVersion`).
 
+> **Flush before your process exits.** Outside `Dev`, events are buffered in memory and sent in
+> batches. Events still buffered when the process exits are lost. Go has no exit hook the SDK could
+> use, so call `Flush` yourself: see [Shutdown](#shutdown).
+
 ## Avo documentation
 
 This is a quick start guide. For more information about the Inspector project please read [Avo Inspector SDK Reference](https://www.avo.app/docs/implementation/avo-inspector-sdk-reference) and the [Avo Inspector Setup Guide](https://www.avo.app/docs/implementation/setup-inspector-sdk).
@@ -11,6 +15,44 @@ This is a quick start guide. For more information about the Inspector project pl
 ```
 go get github.com/avohq/go-avo-inspector/v2
 ```
+
+## Shutdown
+
+Events are sent in batches from an in-memory buffer (except in `Dev`, where each event is sent
+during the call). **Events still buffered or in flight when the process exits are lost.** Go gives
+libraries no exit hook, so the SDK cannot flush for you: call `Flush` before the process exits.
+
+In `main`, defer it right after creating the inspector:
+
+```go
+func main() {
+	inspector, err := avoinspector.NewAvoInspector(apiKey, avoinspector.Prod, "1.0", "my app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer inspector.Flush(avoinspector.DefaultFlushTimeout)
+
+	// ... run your program ...
+}
+```
+
+Deferred calls do not run when the process ends through `os.Exit` (including `log.Fatal`), an
+unrecovered panic in another goroutine, or a signal it does not handle. A `SIGTERM` from your
+orchestrator ends a Go program without running deferred calls unless you handle it, so handle it
+and flush:
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+go func() { _ = server.ListenAndServe() }()
+<-ctx.Done()                              // SIGTERM or Ctrl-C
+_ = server.Shutdown(context.Background()) // let in-flight requests finish tracking
+inspector.Flush(avoinspector.DefaultFlushTimeout)
+```
+
+In a serverless function, call `Flush` before the handler returns, and set `DisableBatchTimer` in
+`Options`: the runtime may freeze or discard the process between invocations.
 
 ## Initialization
 
@@ -95,7 +137,7 @@ where every event is sent before the call returns, a non-200 response returns an
 
 In v1 every call sent the event synchronously and returned the HTTP failure as `error`. Now
 events are batched (except in `Dev`) and sent in the background, so you must call `Flush` before
-the process exits (see below).
+the process exits (see [Shutdown](#shutdown)).
 
 ### Stream id and gateway options
 
@@ -129,18 +171,11 @@ result, err := avoInspector.TrackOrderedSchemaFromEvent("Signup", avoinspector.O
 
 `ExtractSchema` and `ExtractOrderedSchema` return the schema without sending anything.
 
-## Flush before exit
+## Flush and Destroy
 
-Events are held in memory until a batch is sent. Pending and in-flight events are lost if the process
-exits first, so call `Flush` before the process exits, and in serverless functions before the
-handler returns:
-
-```go
-avoInspector.Flush(avoinspector.DefaultFlushTimeout) // sends pending events and waits up to 10 seconds
-```
-
-`Flush` always completes: it sends the pending events and waits for in-flight sends. Its error is
-informational and you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
+`Flush` sends the pending events and waits up to the given timeout for in-flight sends. Call it
+before the process exits (see [Shutdown](#shutdown)). It always completes, and its error is
+informational: you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
 when the timeout passed, and `nil` otherwise; in both cases the pending events were sent and the
 inspector stays usable. Delivery failures are never reported. `Flush(0)` sends the pending events
 without waiting for them; a negative timeout waits up to `DefaultFlushTimeout`.
