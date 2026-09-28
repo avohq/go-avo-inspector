@@ -36,7 +36,8 @@ const (
 )
 
 // ErrFlushTimeout is returned by Flush when in-flight sends had not finished within the timeout.
-// The sends are abandoned for waiting purposes only; the instance stays usable.
+// It is informational: the pending events were still sent, the instance stays usable, and callers
+// may ignore it.
 var ErrFlushTimeout = errors.New("Avo Inspector: flush timed out before all in-flight sends completed")
 
 // shouldLog is the process-wide logging flag (SPEC.md §4.4).
@@ -386,9 +387,11 @@ func (inspector *AvoInspector) dispatch(batch []wireEvent) <-chan sendResult {
 }
 
 // Flush sends every pending event and waits until all in-flight sends have completed, or until
-// timeout (10 seconds when timeout <= 0) has passed, in which case it returns ErrFlushTimeout.
-// Delivery failures are not reported. The inspector stays usable. Call Flush before the process or
-// serverless handler exits: pending events are otherwise lost.
+// timeout (10 seconds when timeout <= 0) has passed. Flush always completes (SPEC.md §4.6): the
+// returned error is informational and callers may ignore it. It is ErrFlushTimeout when the timeout
+// passed first and nil otherwise; either way the pending events were sent and the inspector stays
+// usable. Delivery failures are not reported. Call Flush before the process or serverless handler
+// exits: pending events are otherwise lost.
 func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = defaultFlushTimeout

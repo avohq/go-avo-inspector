@@ -136,8 +136,10 @@ handler returns:
 avoInspector.Flush(0) // sends pending events and waits up to 10 seconds (the default for 0)
 ```
 
-`Flush` returns `ErrFlushTimeout` if in-flight sends were still running when the timeout passed. It
-never reports delivery failures, and the inspector stays usable afterwards.
+`Flush` always completes: it sends the pending events and waits for in-flight sends. Its error is
+informational and you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
+when the timeout passed, and `nil` otherwise; in both cases the pending events were sent and the
+inspector stays usable. Delivery failures are never reported.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
 background flush. After `Destroy`, tracking calls send nothing. Call `Destroy` when you are done with
