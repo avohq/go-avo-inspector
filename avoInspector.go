@@ -79,7 +79,9 @@ type Options struct {
 	// AppName is the application name sent as appName.
 	AppName string
 	// BatchSize flushes the pending batch when it holds this many events. Default 30; always 1 in
-	// Dev, where every event is sent immediately.
+	// Dev. With a batch size of 1, in any env, each event is sent during the tracking call, which
+	// waits for the response (SPEC.md §7.5). When earlier batches are still being sent, that wait
+	// can be longer than the request timeout.
 	BatchSize int
 	// BatchFlushSeconds is the longest an event waits in the pending batch before the scheduled
 	// flush sends it. Default 30; values above 86400 (24 hours) are capped with a warning.
@@ -280,9 +282,9 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 // flush runs, or on Flush.
 //
 // It returns the extracted schema. The returned error is non-nil only for an internal failure
-// before the event was queued; delivery failures are never returned. In Dev (batch size 1) the
-// event is sent before returning, and a non-200 response returns an empty schema. After Destroy it
-// returns an empty schema and sends nothing.
+// before the event was queued; delivery failures are never returned. With a batch size of 1
+// (always in Dev) the event is sent before returning, and a non-200 response returns an empty
+// schema. After Destroy it returns an empty schema and sends nothing.
 func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, options TrackOptions) ([]Property, error) {
 	return inspector.track(eventName, eventProperties, options)
 }

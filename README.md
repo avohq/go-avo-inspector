@@ -18,8 +18,8 @@ go get github.com/avohq/go-avo-inspector/v2
 
 ## Shutdown
 
-Events are sent in batches from an in-memory buffer (except in `Dev`, where each event is sent
-during the call). **Events still buffered or in flight when the process exits are lost.** Go gives
+Events are sent in batches from an in-memory buffer, except with a `BatchSize` of 1 (always the
+case in `Dev`), where each event is sent during the call. **Events still buffered or in flight when the process exits are lost.** Go gives
 libraries no exit hook, so the SDK cannot flush for you: call `Flush` before the process exits.
 
 In `main`, defer it right after creating the inspector:
@@ -93,6 +93,10 @@ avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Option
 A zero `BatchSize`, `BatchFlushSeconds` or `MaxQueueSize` means "use the default", without a warning.
 A negative value is invalid: it logs a warning and the default is used. `BatchFlushSeconds` above
 86400 (24 hours) is capped at 86400 with a warning.
+
+A `BatchSize` of 1, in any environment, makes every tracking call send its event and wait for the
+response, as in `Dev`. When earlier batches are still being sent, that wait can take longer than the
+10-second request timeout.
 
 `MaxQueueSize` bounds only the events buffered before a batch is formed. Batches already formed and
 waiting to be sent have their own limit (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
