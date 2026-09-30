@@ -237,16 +237,10 @@ func classify(value interface{}) valueKind {
 		}
 		rv = rv.Elem()
 	}
+	if kind := scalarKind(rv.Kind()); kind != kindUnknown {
+		return kind
+	}
 	switch rv.Kind() {
-	case reflect.String:
-		return kindString
-	case reflect.Bool:
-		return kindBool
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return kindInt
-	case reflect.Float32, reflect.Float64:
-		return kindFloat
 	case reflect.Map:
 		if rv.IsNil() {
 			return kindNull
@@ -269,9 +263,26 @@ func classify(value interface{}) valueKind {
 	return kindUnknown
 }
 
+// scalarKind returns the kind of a scalar reflect.Kind, or kindUnknown for any other.
+func scalarKind(kind reflect.Kind) valueKind {
+	switch kind {
+	case reflect.String:
+		return kindString
+	case reflect.Bool:
+		return kindBool
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return kindInt
+	case reflect.Float32, reflect.Float64:
+		return kindFloat
+	}
+	return kindUnknown
+}
+
 var (
 	keyValueType   = reflect.TypeOf(KeyValue{})
 	orderedMapType = reflect.TypeOf(OrderedMap(nil))
+	jsonNumberType = reflect.TypeOf(json.Number(""))
 )
 
 // basicTypeName is the SPEC.md §9.2 getBasicPropType: a nested object or list is "object".
@@ -346,12 +357,30 @@ func (p *schemaParser) enterObject(value interface{}, id nodeIdentity, depth int
 	return result
 }
 
-// enterList maps a list value with its identity on the ancestor path.
+// enterList maps a list value with its identity on the ancestor path. A non-empty typed slice or
+// array of scalars maps to its one element type without visiting its elements, so its size costs
+// nothing; it still counts as one expansion.
 func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) []interface{} {
 	pushed := p.push(id)
-	result := p.mapList(listElements(value), depth)
-	p.pop(pushed)
-	return result
+	defer p.pop(pushed)
+	if kind := scalarElementKind(value); kind != kindUnknown {
+		return []interface{}{basicTypeName(kind)}
+	}
+	return p.mapList(listElements(value), depth)
+}
+
+// scalarElementKind returns the kind every element of a non-empty typed slice or array has when
+// its element type is a scalar, and kindUnknown otherwise. A json.Number element is typed by its
+// value, so a []json.Number is not one kind.
+func scalarElementKind(value interface{}) valueKind {
+	if _, ok := value.([]interface{}); ok {
+		return kindUnknown
+	}
+	rv := indirect(reflect.ValueOf(value))
+	if rv.Len() == 0 || rv.Type().Elem() == jsonNumberType {
+		return kindUnknown
+	}
+	return scalarKind(rv.Type().Elem().Kind())
 }
 
 // push counts an expansion and puts id on the ancestor path.
@@ -392,23 +421,33 @@ func (p *schemaParser) mapObject(entries []KeyValue, depth int) []Property {
 
 // mapList is the SPEC.md §9.2 mapping function applied to each element of a list: an object maps
 // to its []Property, a list to its deduplicated element schemas, and a scalar to its type string.
+// Type strings are deduplicated as they are mapped, keeping the first occurrence. An element that
+// is an object or a list is never a duplicate: each keeps its own entry, as in the reference
+// parser, which compares those by identity (SPEC.md §9.3.3).
 func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} {
-	mapped := make([]interface{}, 0, len(elements))
+	mapped := []interface{}{}
+	seen := map[string]bool{}
+	addType := func(typeName string) {
+		if !seen[typeName] {
+			seen[typeName] = true
+			mapped = append(mapped, typeName)
+		}
+	}
 	for _, element := range elements {
 		kind := classify(element)
 		leaf, id := p.visit(element, kind, depth)
 		switch {
 		case leaf:
-			mapped = append(mapped, "object")
+			addType("object")
 		case kind == kindObject:
 			mapped = append(mapped, p.enterObject(element, id, depth+1))
 		case kind == kindList:
 			mapped = append(mapped, p.enterList(element, id, depth+1))
 		default:
-			mapped = append(mapped, basicTypeName(kind))
+			addType(basicTypeName(kind))
 		}
 	}
-	return removeDuplicates(mapped)
+	return mapped
 }
 
 // identity returns what identifies a map, slice or OrderedMap for cycle detection. It returns the
@@ -500,22 +539,4 @@ func indirect(rv reflect.Value) reflect.Value {
 		rv = rv.Elem()
 	}
 	return rv
-}
-
-// removeDuplicates keeps the first occurrence of each type string. An element that is an object
-// or a list is never a duplicate: each keeps its own entry, as in the reference parser, which
-// compares those by identity (SPEC.md §9.3.3).
-func removeDuplicates(items []interface{}) []interface{} {
-	result := make([]interface{}, 0, len(items))
-	seen := map[string]bool{}
-	for _, item := range items {
-		if typeName, ok := item.(string); ok {
-			if seen[typeName] {
-				continue
-			}
-			seen[typeName] = true
-		}
-		result = append(result, item)
-	}
-	return result
 }

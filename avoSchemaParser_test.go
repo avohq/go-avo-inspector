@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -504,6 +505,64 @@ func TestExtractSchema_BudgetMatchesNode(t *testing.T) {
 		digest := sha256.Sum256(encoded)
 		if got := hex.EncodeToString(digest[:]); got != tc.sha256 {
 			t.Errorf("%s: output differs from Node (sha256 %s, %d bytes)", tc.name, got, len(encoded))
+		}
+	}
+}
+
+type namedString string
+
+// A typed slice of scalars has one child type, whatever its length; []json.Number still types
+// each element (SPEC.md §9.3.1.1).
+func TestExtractSchema_TypedScalarSlices(t *testing.T) {
+	array := [3]float32{1, 2, 3}
+	floats := []float64{1.5, 2}
+	assertSchemaJSON(t, extractSchema(om{
+		{"nums", []json.Number{"1.5", "2"}},
+		{"named", []namedString{"a"}},
+		{"bytes", []byte("hi")},
+		{"arr", array},
+		{"parr", &array},
+		{"pslice", &floats},
+		{"empty", []int{}},
+		{"iface", list{1, "a", 2, 1.5, "b", nil, om{{"x", 1}}, 3}},
+		{"ptrs", []*int{nil}},
+		{"u", []uintptr{1}},
+		{"b2", []bool{true}},
+	}), `[{"propertyName":"nums","propertyType":"list(float)","children":["float","int"]},`+
+		`{"propertyName":"named","propertyType":"list(string)","children":["string"]},`+
+		`{"propertyName":"bytes","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"arr","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"parr","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"pslice","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"empty","propertyType":"list(string)","children":[]},`+
+		`{"propertyName":"iface","propertyType":"list(int)","children":["int","string","float","null",[{"propertyName":"x","propertyType":"int"}]]},`+
+		`{"propertyName":"ptrs","propertyType":"list(string)","children":["null"]},`+
+		`{"propertyName":"u","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"b2","propertyType":"list(boolean)","children":["boolean"]}]`)
+}
+
+// Scalars never count toward the limits, so a large list of them must not cost memory in
+// proportion to its length: no boxed copy of a typed slice, no type string per element.
+func TestExtractSchema_LargeScalarListsAllocateLittle(t *testing.T) {
+	const n = 1 << 20
+	floats := make([]float64, n)
+	for i := range floats {
+		floats[i] = float64(i) + 0.5
+	}
+	boxed := make(list, n)
+	for i := range boxed {
+		boxed[i] = floats[i]
+	}
+	for name, value := range map[string]interface{}{
+		"[]float64": floats, "[]byte": make([]byte, n), "[]interface{}": boxed,
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		extractSchema(om{{"v", value}})
+		runtime.ReadMemStats(&after)
+		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
+			t.Errorf("%s of %d elements: allocated %d bytes, want at most 1 MiB", name, n, allocated)
 		}
 	}
 }
