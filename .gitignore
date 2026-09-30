@@ -23,3 +23,7 @@
 *.vsix
 
 .DS_Store
+
+# Conformance: harness binary and local checkout of the spec repo
+.bin/
+.spec-repo/

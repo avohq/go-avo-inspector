@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	avoinspector "github.com/avohq/go-avo-inspector"
+	avoinspector "github.com/avohq/go-avo-inspector/v2"
 )
 
 func main() {
@@ -19,6 +19,14 @@ func main() {
 	}
 
 	avoInspector, _ := avoinspector.NewAvoInspector("_", avoinspector.Dev, "1.0", "my app")
+	// Send anything still buffered before main returns; buffered events are lost at exit.
+	defer func() {
+		// ErrFlushTimeout means sends were still in flight at the timeout; they may not arrive
+		// once main returns. This example logs it and exits anyway.
+		if err := avoInspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+			println("Avo Inspector flush:", err.Error())
+		}
+	}()
 
 	call, _ := avoInspector.TrackSchemaFromEvent("Test Event", data)
 
