@@ -684,7 +684,8 @@ func logLimited(key string, n int, line func(total, suppressed int) string) {
 	logf("%s", line(n+suppressed, suppressed))
 }
 
-// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize).
+// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize) or
+// "send backlog full" (maxWaitingEvents).
 func logDropped(n int, reason string) {
 	logLimited("dropped:"+reason, n, func(total, _ int) string {
 		return fmt.Sprintf("dropped %d event(s) (%s) in the last 10s.", total, reason)
@@ -753,8 +754,9 @@ func logAlways(format string, args ...interface{}) {
 	logf(format, args...)
 }
 
-// logIfEnabled writes only when logging is enabled: diagnostics, non-200 responses and
-// maxQueueSize drops.
+// logIfEnabled writes only when logging is enabled: diagnostics such as per-event lines,
+// successful sends and sampling drops. Data loss and internal errors are always logged, through
+// logLimited.
 func logIfEnabled(format string, args ...interface{}) {
 	if shouldLog.Load() {
 		logf(format, args...)
