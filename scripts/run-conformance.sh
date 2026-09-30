@@ -30,6 +30,8 @@ if [ -z "${SPEC_DIR:-}" ]; then
   if [ ! -d "$SPEC_DIR/.git" ]; then
     git init --quiet "$SPEC_DIR"
     git -C "$SPEC_DIR" remote add origin "$SPEC_REPO_URL"
+  else
+    git -C "$SPEC_DIR" remote set-url origin "$SPEC_REPO_URL"
   fi
   git -C "$SPEC_DIR" fetch --quiet --depth 1 origin "$SPEC_REF"
   git -C "$SPEC_DIR" -c advice.detachedHead=false checkout --quiet --force FETCH_HEAD
