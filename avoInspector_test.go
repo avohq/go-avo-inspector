@@ -406,6 +406,7 @@ func TestBatching_ConcurrentTracksAreSentExactlyOnce(t *testing.T) {
 // captureLogs redirects log output for the rest of the test and returns a reader of it.
 func captureLogs(t *testing.T) func() string {
 	t.Helper()
+	resetLogLimiter(t)
 	buffer := &strings.Builder{}
 	logMu.Lock()
 	previous := logOutput
@@ -482,22 +483,6 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 			t.Errorf("expected an internal error log without the apiKey, got %q", output)
 		}
 	})
-}
-
-// Everything else, including a non-200 response, is logged only when logging is enabled.
-func TestLogging_Non200IsLoggedOnlyWhenEnabled(t *testing.T) {
-	newTestServer(t, respondWith(500, `{}`))
-	for _, enabled := range []bool{false, true} {
-		logs := captureLogs(t)
-		inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-		inspector.EnableLogging(enabled)
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
-		_ = inspector.Flush(2 * time.Second)
-		logged := strings.Contains(logs(), "status 500")
-		if logged != enabled {
-			t.Errorf("logging %v: non-200 logged = %v, output %q", enabled, logged, logs())
-		}
-	}
 }
 
 // Flush(0) sends the pending events without waiting for them, as Node and Java do; a negative
@@ -812,11 +797,220 @@ func TestLogging_NeverShowsPropertyValues(t *testing.T) {
 		`"propertyName":"email","propertyType":"string"`,
 		`"propertyName":"note","propertyType":"string"`,
 		`"propertyName":"tags","propertyType":"list(string)"`,
-		"status 500",
-		"Request failed",
+		"rejected with HTTP 500",
+		"schema sending failed: Request failed.",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("logs lack %q:\n%s", expected, output)
 		}
+	}
+}
+
+// resetLogLimiter clears the always-on log rate limit, so earlier tests cannot suppress this one's
+// lines, and restores the real clock afterwards.
+func resetLogLimiter(t *testing.T) {
+	logLimiter.Lock()
+	logLimiter.entries = map[string]*limitedLog{}
+	logLimiter.now = time.Now
+	logLimiter.Unlock()
+	t.Cleanup(func() {
+		logLimiter.Lock()
+		logLimiter.entries = map[string]*limitedLog{}
+		logLimiter.now = time.Now
+		logLimiter.Unlock()
+	})
+}
+
+// fakeLogClock makes the log rate limit read a clock the test advances.
+func fakeLogClock(t *testing.T) (advance func(time.Duration)) {
+	var mu sync.Mutex
+	current := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	logLimiter.Lock()
+	logLimiter.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	}
+	logLimiter.Unlock()
+	return func(d time.Duration) {
+		mu.Lock()
+		current = current.Add(d)
+		mu.Unlock()
+	}
+}
+
+func countLines(output, fragment string) int {
+	n := 0
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, fragment) {
+			n++
+		}
+	}
+	return n
+}
+
+// Events dropped because the buffer is full are data loss: always logged, once per 10s window, and
+// the suppressed count is reported with the next line.
+func TestLogging_DroppedEventsAreRateLimited(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 10; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", map[string]interface{}{"email": "PII-MARKER-123@example.com"})
+	}
+	if n := countLines(logs(), "(queue full)"); n != 1 {
+		t.Fatalf("expected one dropped line in the window, got %d:\n%s", n, logs())
+	}
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 1 event(s) (queue full) in the last 10s.") {
+		t.Errorf("unexpected first line:\n%s", logs())
+	}
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 8 event(s) (queue full) in the last 10s.") {
+		t.Errorf("expected the 7 suppressed drops plus this one to be reported:\n%s", logs())
+	}
+	for _, secret := range []string{"secret-key-789", "PII-MARKER-123"} {
+		if strings.Contains(logs(), secret) {
+			t.Errorf("logs contain %q", secret)
+		}
+	}
+}
+
+// Rejected batches are data loss: always logged, one line per status per 10s window.
+func TestLogging_Non200IsRateLimitedPerStatus(t *testing.T) {
+	status := 500
+	var mu sync.Mutex
+	newTestServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		code := status
+		mu.Unlock()
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(`{"ok":false,"error":"secret-body"}`))
+	})
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 1, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 5; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	mu.Lock()
+	status = 400
+	mu.Unlock()
+	for i := 0; i < 3; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	output := logs()
+	if countLines(output, "rejected with HTTP 500") != 1 || countLines(output, "rejected with HTTP 400") != 1 {
+		t.Fatalf("expected one line per status:\n%s", output)
+	}
+	if !strings.Contains(output, "[Avo Inspector] 1 batch(es) rejected with HTTP 500 in the last 10s.") {
+		t.Errorf("unexpected 500 line:\n%s", output)
+	}
+	advance(logRateWindow)
+	mu.Lock()
+	status = 500
+	mu.Unlock()
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if !strings.Contains(logs(), "[Avo Inspector] 5 batch(es) rejected with HTTP 500 in the last 10s.") {
+		t.Errorf("expected the 4 suppressed rejections plus this one:\n%s", logs())
+	}
+	for _, secret := range []string{"secret-key-789", "secret-body"} {
+		if strings.Contains(logs(), secret) {
+			t.Errorf("logs contain %q", secret)
+		}
+	}
+}
+
+// A storm of failed sends prints at most one line per window, then reports how many were
+// suppressed.
+func TestLogging_FailureStormIsRateLimited(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 1, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 5; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	if n := countLines(logs(), "schema sending failed"); n != 1 {
+		t.Fatalf("expected one failed line in the window, got %d:\n%s", n, logs())
+	}
+	if !strings.Contains(logs(), "[Avo Inspector] schema sending failed: Request failed.\n") {
+		t.Errorf("unexpected failed line:\n%s", logs())
+	}
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if !strings.Contains(logs(), "[Avo Inspector] schema sending failed: Request failed. (4 more in the last 10s)") {
+		t.Errorf("expected the suppressed count:\n%s", logs())
+	}
+	if strings.Contains(logs(), "secret-key-789") {
+		t.Errorf("logs contain the apiKey")
+	}
+}
+
+// Internal errors are always logged, rate-limited like the other kinds.
+func TestLogging_InternalErrorsAreRateLimited(t *testing.T) {
+	logs := captureLogs(t)
+	fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	previous := newGuid
+	newGuid = func() string { panic("boom") }
+	t.Cleanup(func() { newGuid = previous })
+	for i := 0; i < 3; i++ {
+		if _, err := inspector.TrackSchemaFromEvent("E", nil); err == nil {
+			t.Fatal("expected the internal error")
+		}
+	}
+	if n := countLines(logs(), "internal error"); n != 1 {
+		t.Errorf("expected one internal-error line in the window, got %d:\n%s", n, logs())
+	}
+}
+
+// Sampling drops are not data loss the caller can act on: they stay behind the logging flag.
+func TestLogging_SamplingDropsAreSilentWhenLoggingIsOff(t *testing.T) {
+	logs := captureLogs(t)
+	inspector := mustInspector(t, Options{Env: Staging, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	inspector.setSamplingRate(0)
+	for i := 0; i < 5; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	if output := logs(); output != "" {
+		t.Errorf("expected no output, got %q", output)
+	}
+}
+
+// The rate limit is safe under concurrent use, loses no count, and starts no goroutine or timer.
+func TestLogging_RateLimitIsConcurrencySafe(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	baseline := runtime.NumGoroutine()
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logDropped(1, "queue full")
+		}()
+	}
+	wg.Wait()
+	// The callers finish just after wg.Done; wait for them to exit before counting.
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > baseline {
+		t.Errorf("the rate limit left %d goroutines running, baseline %d", n, baseline)
+	}
+	if n := countLines(logs(), "(queue full)"); n != 1 {
+		t.Fatalf("expected one line, got %d:\n%s", n, logs())
+	}
+	advance(logRateWindow)
+	logDropped(1, "queue full")
+	if !strings.Contains(logs(), "dropped 100 event(s) (queue full) in the last 10s.") {
+		t.Errorf("expected the 99 suppressed drops plus this one:\n%s", logs())
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -247,7 +248,7 @@ func (inspector *AvoInspector) ExtractOrderedSchema(eventProperties OrderedMap) 
 func safeExtractSchema(eventProperties interface{}) (schema []Property) {
 	defer func() {
 		if r := recover(); r != nil {
-			logAlways("extractSchema error: %v", r)
+			logInternalError("extractSchema error", r)
 			schema = []Property{}
 		}
 	}()
@@ -288,7 +289,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 
 	defer func() {
 		if r := recover(); r != nil {
-			logAlways("internal error: %v", r)
+			logInternalError("internal error", r)
 			schema, err = nil, errors.New(internalErrorMessage)
 		}
 	}()
@@ -330,7 +331,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	inspector.mu.Unlock()
 
 	if dropped > 0 {
-		logIfEnabled("maxQueueSize exceeded; dropped %d oldest event(s).", dropped)
+		logDropped(dropped, "queue full")
 	}
 	if send == nil {
 		return schema, nil
@@ -425,11 +426,11 @@ func (inspector *AvoInspector) startSend(send *inFlightSend) <-chan sendResult {
 		case sendOk:
 			logIfEnabled("sent %d event(s).", len(batch))
 		case sendNon200:
-			logIfEnabled("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
+			logRejected(res.statusCode)
 		case sendFailed:
 			// A send abandoned by Destroy is not a failure.
 			if !errors.Is(res.err, errRequestAborted) {
-				logAlways("send of %d event(s) failed (%v); the batch is dropped.", len(batch), res.err)
+				logFailedSend(res.err)
 			}
 		}
 		result <- res
@@ -556,6 +557,81 @@ func (inspector *AvoInspector) setSamplingRate(rate float64) {
 // testHookBeforeSend, when set by a test, runs after a size-triggered batch has left the buffer
 // and before its send starts. It is always nil outside tests.
 var testHookBeforeSend func()
+
+// logRateWindow is how long an always-on log line of one kind stays quiet after it is printed.
+const logRateWindow = 10 * time.Second
+
+// logLimiter rate-limits the always-on log lines. For each key (a kind, plus the reason or status
+// within it) it keeps when the last line was printed and how many occurrences were suppressed
+// since. It has no timer: suppressed counts are reported on the next occurrence of that key.
+var logLimiter = struct {
+	sync.Mutex
+	entries map[string]*limitedLog
+	now     func() time.Time
+}{entries: map[string]*limitedLog{}, now: time.Now}
+
+type limitedLog struct {
+	printed    time.Time
+	suppressed int
+}
+
+// logLimited prints an always-on line for n occurrences under key, at most once per
+// logRateWindow. line receives the occurrences to report, n plus those suppressed since the last
+// line for key, and how many of them were suppressed.
+func logLimited(key string, n int, line func(total, suppressed int) string) {
+	logLimiter.Lock()
+	now := logLimiter.now()
+	entry, seen := logLimiter.entries[key]
+	if seen && now.Sub(entry.printed) < logRateWindow {
+		entry.suppressed += n
+		logLimiter.Unlock()
+		return
+	}
+	suppressed := 0
+	if seen {
+		suppressed = entry.suppressed
+	}
+	logLimiter.entries[key] = &limitedLog{printed: now}
+	logLimiter.Unlock()
+	logf("%s", line(n+suppressed, suppressed))
+}
+
+// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize).
+func logDropped(n int, reason string) {
+	logLimited("dropped:"+reason, n, func(total, _ int) string {
+		return fmt.Sprintf("dropped %d event(s) (%s) in the last 10s.", total, reason)
+	})
+}
+
+// logRejected reports a batch answered with a non-200 status. Only the status is logged, never
+// the response body.
+func logRejected(status int) {
+	logLimited("non200:"+strconv.Itoa(status), 1, func(total, _ int) string {
+		return fmt.Sprintf("%d batch(es) rejected with HTTP %d in the last 10s.", total, status)
+	})
+}
+
+// logFailedSend reports a batch lost to a network error, a timeout or a refused send.
+func logFailedSend(err error) {
+	label := err.Error()
+	logLimited("failed:"+label, 1, func(_, suppressed int) string {
+		return "schema sending failed: " + label + "." + suppressedSuffix(suppressed)
+	})
+}
+
+// logInternalError reports a recovered internal error.
+func logInternalError(context string, recovered interface{}) {
+	logLimited("internal:"+context, 1, func(_, suppressed int) string {
+		return fmt.Sprintf("%s: %v%s", context, recovered, suppressedSuffix(suppressed))
+	})
+}
+
+func suppressedSuffix(suppressed int) string {
+	if suppressed == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d more in the last 10s)", suppressed)
+}
 
 // logOutput receives every log line; tests swap it under logMu.
 var (

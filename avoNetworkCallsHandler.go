@@ -95,6 +95,7 @@ const (
 // body carried a numeric samplingRate in [0, 1].
 type sendResult struct {
 	status       sendStatus
+	statusCode   int
 	samplingRate *float64
 	err          error
 }
@@ -201,7 +202,7 @@ func (h *AvoNetworkCallsHandler) send(ctx context.Context, events []wireEvent) s
 	body, _ := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes))
 
 	if res.StatusCode != http.StatusOK {
-		return sendResult{status: sendNon200, err: errors.New("Inspector API returned status " + strconv.Itoa(res.StatusCode))}
+		return sendResult{status: sendNon200, statusCode: res.StatusCode, err: errors.New("Inspector API returned status " + strconv.Itoa(res.StatusCode))}
 	}
 	return sendResult{status: sendOk, samplingRate: parseSamplingRate(body)}
 }
