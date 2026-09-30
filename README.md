@@ -85,7 +85,7 @@ avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Option
 	AppName:           "my app",
 	BatchSize:         30,    // send when this many events are pending (default 30; always 1 in Dev)
 	BatchFlushSeconds: 30,    // send pending events at least this often (default 30)
-	MaxQueueSize:      1000,  // pending events beyond this drop the oldest (default 1000)
+	MaxQueueSize:      1000,  // buffered events beyond this drop the oldest (default 1000)
 	DisableBatchTimer: false, // set to true in serverless deployments
 })
 ```
@@ -93,6 +93,29 @@ avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Option
 A zero `BatchSize`, `BatchFlushSeconds` or `MaxQueueSize` means "use the default", without a warning.
 A negative value is invalid: it logs a warning and the default is used. `BatchFlushSeconds` above
 86400 (24 hours) is capped at 86400 with a warning.
+
+`MaxQueueSize` bounds only the events buffered before a batch is formed. Batches already formed and
+waiting to be sent have their own limit (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
+
+### High-volume and backfill jobs
+
+At most 4 requests are sent at once. Batches formed while all 4 are busy wait their turn, and up to
+10,000 events can wait. Beyond that the oldest waiting events are dropped and the drop is logged, so
+the number of events held for sending stays bounded when the endpoint is slow or down.
+
+A job that tracks events faster than the endpoint accepts them (for example a backfill loop) can
+fill that allowance. Call `Flush` every few thousand events so events are not dropped for lack of
+room while they wait:
+
+```go
+for i, row := range rows {
+	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
+	if i%5000 == 4999 {
+		avoInspector.Flush(avoinspector.DefaultFlushTimeout)
+	}
+}
+avoInspector.Flush(avoinspector.DefaultFlushTimeout)
+```
 
 ## Enabling logs
 
@@ -113,13 +136,15 @@ Data loss is always logged, whatever this setting:
 | What | Log line |
 |---|---|
 | Events dropped because the buffer is full (`MaxQueueSize`) | `dropped N event(s) (queue full) in the last 10s.` |
+| Events dropped because more than 10,000 wait to be sent | `dropped N event(s) (send backlog full) in the last 10s.` |
 | Batches rejected with a non-200 response | `N batch(es) rejected with HTTP <status> in the last 10s.` |
 | Failed sends (network error, timeout, refused send) | `schema sending failed: Request failed.` or `Request timed out.` |
 | Internal errors | `internal error: ...` |
 
 Each kind, and each reason or status within it, prints at most one line per 10 seconds: the first
 occurrence prints at once, later ones are counted, and the count is reported with the next line of
-that kind. Response bodies are never logged. Everything else, such as events dropped by sampling
+that kind. The warning for a `StreamId` containing `:` is rate-limited the same way. Response bodies
+are never logged. Everything else, such as events dropped by sampling
 and per-event debug lines, is logged only when logging is enabled. Sends abandoned by `Destroy` are
 not logged.
 
@@ -256,7 +281,9 @@ These are the behaviour changes you may notice:
   non-200 response returns an empty schema.
 - **Events are buffered outside `Dev`.** In `Staging` and `Prod`, events are sent in batches in the
   background instead of during the call. Call `Flush` before the process exits, or buffered events
-  are lost. `Dev` still sends each event before the call returns.
+  are lost. `Dev` still sends each event before the call returns. At most 4 batches are sent at
+  once, and up to 10,000 events can wait to be sent; beyond that the oldest waiting events are
+  dropped (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
 - **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process, and it
   now also controls the network logs, which in v1.0.0 it never reached.
 - **Unknown environments fall back to `Dev`.** Any env other than `Dev`, `Staging` or `Prod` now
