@@ -192,9 +192,11 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			// Send directly, bypassing the per-event sampling decision.
 			event := inspector.newWireEvent("E", "", 0.5, []Property{}, TrackOptions{})
 			inspector.mu.Lock()
-			send := inspector.registerSend([]wireEvent{event})
+			inspector.pending = []wireEvent{event}
+			batch, startSender, dropped := inspector.takeBatch()
 			inspector.mu.Unlock()
-			<-inspector.startSend(send)
+			inspector.launch(batch, startSender, dropped)
+			<-batch.result
 			inspector.mu.Lock()
 			rate := inspector.samplingRate
 			inspector.mu.Unlock()
@@ -1034,5 +1036,143 @@ func TestLogging_StreamIdColonWarningIsRateLimited(t *testing.T) {
 	}
 	if strings.Contains(logs(), "user:42") {
 		t.Errorf("the streamId value must not be logged")
+	}
+}
+
+// hungServer holds every request until release is closed and records the peak number of
+// requests in progress at once.
+func hungServer(t *testing.T) (server *testServer, release func(), peak func() int) {
+	var mu sync.Mutex
+	current, highest := 0, 0
+	gate := make(chan struct{})
+	server = newTestServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		current++
+		if current > highest {
+			highest = current
+		}
+		mu.Unlock()
+		<-gate
+		mu.Lock()
+		current--
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"samplingRate":1}`))
+	})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return server, release, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return highest
+	}
+}
+
+func deliveredNames(server *testServer) []string {
+	names := []string{}
+	for _, request := range server.captured() {
+		names = append(names, eventNames(request)...)
+	}
+	return names
+}
+
+// At most 4 batches are sent at once; later batches wait their turn instead of each opening a
+// request and a goroutine.
+func TestSendModel_AtMostFourSendsAtOnce(t *testing.T) {
+	captureLogs(t)
+	server, release, peak := hungServer(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	baseline := runtime.NumGoroutine()
+	for i := 0; i < 100; i++ {
+		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+	}
+	time.Sleep(300 * time.Millisecond)
+	// Each request in progress also holds a few net/http client and server goroutines.
+	if extra := runtime.NumGoroutine() - baseline; extra > 4*5 {
+		t.Errorf("%d extra goroutines for 50 batches against a hung server", extra)
+	}
+	if got := peak(); got != 4 {
+		t.Errorf("expected 4 requests in progress at once, got %d", got)
+	}
+	release()
+	_ = inspector.Flush(5 * time.Second)
+	if n := len(deliveredNames(server)); n != 100 {
+		t.Errorf("expected all 100 events delivered, got %d", n)
+	}
+}
+
+// A burst that never waits between calls still delivers everything once flushed: 9,000 events fit
+// in the 10,000-event waiting allowance.
+func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
+	logs := captureLogs(t)
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 9000; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	_ = inspector.Flush(10 * time.Second)
+	if n := len(deliveredNames(server)); n != 9000 {
+		t.Errorf("expected 9000 events delivered, got %d", n)
+	}
+	if strings.Contains(logs(), "dropped") {
+		t.Errorf("nothing should be dropped:\n%s", logs())
+	}
+}
+
+// Past the 10,000-event waiting allowance the oldest waiting events are dropped: what is sent is
+// the batches already in flight plus the newest 10,000, with one rate-limited drop line.
+func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
+	logs := captureLogs(t)
+	fakeLogClock(t)
+	server, release, _ := hungServer(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	const total = 20010
+	for i := 0; i < total; i++ {
+		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+	}
+	release()
+	_ = inspector.Flush(10 * time.Second)
+
+	expected := map[string]bool{}
+	for i := 0; i < 4*30; i++ {
+		expected[fmt.Sprintf("E%d", i)] = true
+	}
+	for i := total - 10000; i < total; i++ {
+		expected[fmt.Sprintf("E%d", i)] = true
+	}
+	delivered := deliveredNames(server)
+	if len(delivered) != len(expected) {
+		t.Errorf("expected %d events delivered, got %d", len(expected), len(delivered))
+	}
+	for _, name := range delivered {
+		if !expected[name] {
+			t.Errorf("unexpected event %s delivered", name)
+			break
+		}
+	}
+	if n := countLines(logs(), "(send backlog full)"); n != 1 {
+		t.Errorf("expected one backlog drop line, got %d:\n%s", n, logs())
+	}
+}
+
+// Destroy discards batches waiting for a send slot: only the batches already in flight reached the
+// server.
+func TestSendModel_DestroyDiscardsWaitingBatches(t *testing.T) {
+	captureLogs(t)
+	server, release, _ := hungServer(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 40; i++ {
+		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+	}
+	time.Sleep(200 * time.Millisecond)
+	inspector.Destroy()
+	release()
+	time.Sleep(200 * time.Millisecond)
+	if n := len(server.captured()); n != 4 {
+		t.Errorf("expected only the 4 in-flight batches to reach the server, got %d", n)
 	}
 }
