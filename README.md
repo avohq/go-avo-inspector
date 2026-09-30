@@ -106,9 +106,22 @@ avoInspector.EnableLogging(true)
 `ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr. They never
 include the API key or property values: a tracked event is logged with its schema (property names
 and types), so values such as email addresses stay out of your logs even when another inspector in
-the process turns logging on. Failed sends (network errors, timeouts, a refused send) and internal errors are
-always logged, whatever this setting; everything else, including non-200 responses, is logged only
-when logging is enabled.
+the process turns logging on.
+
+Data loss is always logged, whatever this setting:
+
+| What | Log line |
+|---|---|
+| Events dropped because the buffer is full (`MaxQueueSize`) | `dropped N event(s) (queue full) in the last 10s.` |
+| Batches rejected with a non-200 response | `N batch(es) rejected with HTTP <status> in the last 10s.` |
+| Failed sends (network error, timeout, refused send) | `schema sending failed: Request failed.` or `Request timed out.` |
+| Internal errors | `internal error: ...` |
+
+Each kind, and each reason or status within it, prints at most one line per 10 seconds: the first
+occurrence prints at once, later ones are counted, and the count is reported with the next line of
+that kind. Response bodies are never logged. Everything else, such as events dropped by sampling
+and per-event debug lines, is logged only when logging is enabled. Sends abandoned by `Destroy` are
+not logged.
 
 ## Sending event schemas
 
@@ -254,8 +267,9 @@ These are the behaviour changes you may notice:
   The missing-version error message now reads "Many features of Inspector rely on versioning" (it
   was "Some features").
 - **Logs go to stderr.** All logs are written to stderr with an `[Avo Inspector] ` prefix. v1.0.0
-  wrote some to stdout and some through the standard `log` package. Failed sends and internal
-  errors are now logged even when logging is off. A tracked event is logged with its schema, not
+  wrote some to stdout and some through the standard `log` package. Dropped events, rejected
+  batches, failed sends and internal errors are now logged even when logging is off, at most once
+  per 10 seconds per kind. A tracked event is logged with its schema, not
   its property values, which v1.0.0 printed.
 - **New endpoint and wire body.** Events go to `https://api.avo.app/inspector/v2/track` with
   `api-key`, `env` and `X-Avo-Client` headers and `Content-Type: application/json`, gzipped when
