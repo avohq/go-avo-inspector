@@ -288,8 +288,9 @@ These are the behaviour changes you may notice:
   are lost. `Dev` still sends each event before the call returns. At most 4 batches are sent at
   once, and up to 10,000 events can wait to be sent; beyond that the oldest waiting events are
   dropped (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
-- **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process, and it
-  now also controls the network logs, which in v1.0.0 it never reached.
+- **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process. It
+  controls diagnostic lines, such as per-event lines, successful sends and sampling drops. Data
+  loss and internal errors are always logged (see [Enabling logs](#enabling-logs)).
 - **Unknown environments fall back to `Dev`.** Any env other than `Dev`, `Staging` or `Prod` now
   becomes `Dev`, with a warning: each event is sent immediately and logging is turned on. In v1.0.0
   only an empty env did this, and any other value was sent as given.
