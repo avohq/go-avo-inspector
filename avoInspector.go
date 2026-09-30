@@ -297,7 +297,9 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	schema = safeExtractSchema(eventProperties)
 	streamId := options.StreamId
 	if strings.Contains(streamId, ":") {
-		logAlways("streamId contains ':'; using the value verbatim.")
+		logLimited("streamid-colon", 1, func(_, suppressed int) string {
+			return "streamId contains ':'; using the value verbatim." + suppressedSuffix(suppressed)
+		})
 	}
 	if shouldLog.Load() {
 		logf("supplied event %q with schema %s", eventName, schemaForLog(schema))

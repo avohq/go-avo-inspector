@@ -1014,3 +1014,25 @@ func TestLogging_RateLimitIsConcurrencySafe(t *testing.T) {
 		t.Errorf("expected the 99 suppressed drops plus this one:\n%s", logs())
 	}
 }
+
+// The per-call warning for a streamId containing ':' goes through the same rate limit.
+func TestLogging_StreamIdColonWarningIsRateLimited(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 5; i++ {
+		_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, TrackOptions{StreamId: "user:42"})
+	}
+	if n := countLines(logs(), "streamId contains ':'"); n != 1 {
+		t.Fatalf("expected one warning in the window, got %d:\n%s", n, logs())
+	}
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, TrackOptions{StreamId: "user:42"})
+	if !strings.Contains(logs(), "[Avo Inspector] streamId contains ':'; using the value verbatim. (4 more in the last 10s)") {
+		t.Errorf("expected the suppressed count:\n%s", logs())
+	}
+	if strings.Contains(logs(), "user:42") {
+		t.Errorf("the streamId value must not be logged")
+	}
+}
