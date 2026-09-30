@@ -194,9 +194,9 @@ result, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properti
 ```
 
 All fields are optional. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
-`"android"`, never a user identifier. When `OriginHint` is set, the event is sent with
-`OriginAppVersion` as its app version (or none, if that is empty) instead of the inspector's app
-version.
+`"android"`, never a user identifier. A non-blank `OriginAppVersion` replaces the inspector's app
+version for that event, whether or not `OriginHint` is set. When `OriginHint` is set and
+`OriginAppVersion` is blank, the event is sent without an app version.
 
 ### Property order
 
