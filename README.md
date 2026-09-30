@@ -103,8 +103,10 @@ applies to every inspector in the process. Do not enable logs in production.
 avoInspector.EnableLogging(true)
 ```
 
-`ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr and never
-include the API key. Failed sends (network errors, timeouts, a refused send) and internal errors are
+`ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr. They never
+include the API key or property values: a tracked event is logged with its schema (property names
+and types), so values such as email addresses stay out of your logs even when another inspector in
+the process turns logging on. Failed sends (network errors, timeouts, a refused send) and internal errors are
 always logged, whatever this setting; everything else, including non-200 responses, is logged only
 when logging is enabled.
 
@@ -253,7 +255,8 @@ These are the behaviour changes you may notice:
   was "Some features").
 - **Logs go to stderr.** All logs are written to stderr with an `[Avo Inspector] ` prefix. v1.0.0
   wrote some to stdout and some through the standard `log` package. Failed sends and internal
-  errors are now logged even when logging is off.
+  errors are now logged even when logging is off. A tracked event is logged with its schema, not
+  its property values, which v1.0.0 printed.
 - **New endpoint and wire body.** Events go to `https://api.avo.app/inspector/v2/track` with
   `api-key`, `env` and `X-Avo-Client` headers and `Content-Type: application/json`, gzipped when
   1024 bytes or larger. Each event is one element of the body. The separate `sessionStarted`

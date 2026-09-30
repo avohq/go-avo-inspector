@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -297,7 +298,9 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	if strings.Contains(streamId, ":") {
 		logAlways("streamId contains ':'; using the value verbatim.")
 	}
-	logIfEnabled("supplied event %q", eventName)
+	if shouldLog.Load() {
+		logf("supplied event %q with schema %s", eventName, schemaForLog(schema))
+	}
 
 	// SPEC.md §7.7: per-event sampling at enqueue.
 	if rand.Float64() > samplingRate {
@@ -560,12 +563,24 @@ var (
 	logOutput io.Writer = os.Stderr
 )
 
-// Log helpers. None of them may be passed the apiKey (SPEC.md §7.5.1).
+// Log helpers. None of them may be passed the apiKey (SPEC.md §7.5.1) or raw event property
+// values; log a schema with schemaForLog instead.
 
 func logf(format string, args ...interface{}) {
 	logMu.Lock()
 	defer logMu.Unlock()
 	fmt.Fprintf(logOutput, logPrefix+format+"\n", args...)
+}
+
+// schemaForLog renders a schema in its wire shape (property names, types and children) for a log
+// line. It is the only form of event properties that may be logged: logging is process-wide, so a
+// dev instance can turn it on for a prod one, and raw values can hold personal data.
+func schemaForLog(schema []Property) string {
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
 }
 
 // logAlways writes whatever the logging flag: warnings about caller mistakes (SPEC.md §4.2,

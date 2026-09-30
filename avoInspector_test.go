@@ -775,3 +775,48 @@ func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
 		t.Errorf("a valid multibyte apiKey must be accepted and sent, got %d requests", len(requests))
 	}
 }
+
+// Logs show the event's schema (property names and types), never raw property values or the
+// apiKey, even with logging on and across tracking, send failures and Flush. Logging is
+// process-wide, so a dev instance can turn it on for a prod one.
+func TestLogging_NeverShowsPropertyValues(t *testing.T) {
+	const marker = "PII-MARKER-123@example.com"
+	const apiKey = "secret-key-456"
+	properties := map[string]interface{}{
+		"email":  marker,
+		"nested": map[string]interface{}{"note": marker},
+		"tags":   []interface{}{marker},
+	}
+	logs := captureLogs(t)
+
+	server := newTestServer(t, respondWith(500, `{}`))
+	dev := mustInspector(t, Options{ApiKey: apiKey, Env: Dev})
+	_, _ = dev.TrackSchemaFromEvent("Signed Up", properties)
+
+	staging := mustInspector(t, Options{ApiKey: apiKey, Env: Staging, BatchSize: 30, MaxQueueSize: 1, DisableBatchTimer: true})
+	staging.EnableLogging(true)
+	_, _ = staging.TrackSchemaFromEventWithOptions("Signed Up", properties, TrackOptions{StreamId: "s:1", OriginHint: "web"})
+	_, _ = staging.TrackSchemaFromEvent("Signed Up", properties)
+	_ = staging.Flush(2 * time.Second)
+	server.Close()
+	_, _ = staging.TrackSchemaFromEvent("Signed Up", properties)
+	_ = staging.Flush(2 * time.Second)
+
+	output := logs()
+	for _, secret := range []string{marker, apiKey} {
+		if strings.Contains(output, secret) {
+			t.Errorf("logs contain %q:\n%s", secret, output)
+		}
+	}
+	for _, expected := range []string{
+		`"propertyName":"email","propertyType":"string"`,
+		`"propertyName":"note","propertyType":"string"`,
+		`"propertyName":"tags","propertyType":"list(string)"`,
+		"status 500",
+		"Request failed",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Errorf("logs lack %q:\n%s", expected, output)
+		}
+	}
+}
