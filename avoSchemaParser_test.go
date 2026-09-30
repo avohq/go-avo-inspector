@@ -1,6 +1,8 @@
 package avoinspector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -357,5 +359,151 @@ func TestProperty_JSONRoundTrip(t *testing.T) {
 				t.Errorf("re-encoding differs\n got: %s\nwant: %s", reencoded, encoded)
 			}
 		})
+	}
+}
+
+// sharedDAG builds levels nested maps where every key at a level refers to the same next-level
+// map: no cycle, but fanOut^levels paths without a budget.
+func sharedDAG(fanOut, levels int) OrderedMap {
+	next := om{{"leaf", 1}}
+	for level := levels; level >= 1; level-- {
+		current := om{}
+		for i := 0; i < fanOut; i++ {
+			current = append(current, kv{fmt.Sprintf("k%d", i), next})
+		}
+		next = current
+	}
+	return next
+}
+
+// countExpanded counts the objects and lists in a schema that were expanded (non-leaf), plus
+// the root, and the complex values cut to "object".
+func countExpanded(schema []Property) (expanded, cut int) {
+	var walkList func([]interface{})
+	var walk func([]Property)
+	walk = func(entries []Property) {
+		for _, entry := range entries {
+			switch {
+			case entry.PropertyType == "object" && len(entry.Children) == 0 && entry.ListChildren == nil:
+				// Either an empty object or a cut value; the tests below use no empty objects.
+				cut++
+			case entry.PropertyType == "object":
+				expanded++
+				walk(entry.Children)
+			case entry.ListChildren != nil:
+				expanded++
+				walkList(entry.ListChildren)
+			}
+		}
+	}
+	walkList = func(items []interface{}) {
+		for _, item := range items {
+			switch v := item.(type) {
+			case []Property:
+				expanded++
+				walk(v)
+			case []interface{}:
+				expanded++
+				walkList(v)
+			case string:
+				if v == "object" {
+					cut++
+				}
+			}
+		}
+	}
+	walk(schema)
+	return expanded + 1, cut
+}
+
+// Shared references that are not cycles are bounded by a per-call budget of 10,000 expanded
+// objects and lists; past it, complex values are cut like the depth cap.
+func TestExtractSchema_SharedReferencesAreBounded(t *testing.T) {
+	for _, fanOut := range []int{4, 6} {
+		t.Run(fmt.Sprintf("fan-out %d", fanOut), func(t *testing.T) {
+			input := sharedDAG(fanOut, 12)
+			done := make(chan []Property, 1)
+			start := time.Now()
+			go func() { done <- extractSchema(input) }()
+			select {
+			case schema := <-done:
+				elapsed := time.Since(start)
+				// About 1.5ms, 11ms under -race; without the budget, fan-out 4 took 17s.
+				if elapsed > 100*time.Millisecond {
+					t.Errorf("took %v", elapsed)
+				}
+				t.Logf("fan-out %d: %v", fanOut, elapsed)
+				expanded, _ := countExpanded(schema)
+				if expanded != maxSchemaExpansions {
+					t.Errorf("expected exactly %d expanded values, got %d", maxSchemaExpansions, expanded)
+				}
+				// Bounded by the budget: at most fanOut entries per expanded value.
+				if encoded, _ := json.Marshal(schema); len(encoded) > maxSchemaExpansions*(fanOut+1)*80 {
+					t.Errorf("schema JSON is %d bytes", len(encoded))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("extraction did not finish")
+			}
+		})
+	}
+}
+
+// The budget counts the root and every list: root + list + 9,998 objects is exactly 10,000, so a
+// 9,999th object is the first value cut.
+func TestExtractSchema_ExpansionBudgetBoundary(t *testing.T) {
+	objects := func(n int) list {
+		items := make(list, n)
+		for i := range items {
+			items[i] = om{{"i", i}}
+		}
+		return items
+	}
+	within := extractSchema(om{{"items", objects(9998)}})
+	if expanded, cut := countExpanded(within); expanded != 10000 || cut != 0 {
+		t.Errorf("9,998 objects: expected 10000 expanded and none cut, got %d and %d", expanded, cut)
+	}
+	// The two cut elements are both the type string "object", which is deduplicated like any
+	// type string, so the list ends in one "object".
+	over := extractSchema(om{{"items", objects(10000)}})
+	children := over[0].ListChildren
+	if expanded, cut := countExpanded(over); expanded != 10000 || cut != 1 {
+		t.Errorf("10,000 objects: expected 10000 expanded and 1 cut, got %d and %d", expanded, cut)
+	}
+	if len(children) != 9999 || children[9997] == "object" || children[9998] != "object" {
+		t.Errorf("expected 9998 expanded objects then \"object\", got %d children", len(children))
+	}
+	// Scalars never count toward the budget.
+	scalars := make(list, 20000)
+	for i := range scalars {
+		scalars[i] = i
+	}
+	assertSchemaJSON(t, extractSchema(om{{"n", scalars}, {"after", om{{"x", 1}}}}),
+		`[{"propertyName":"n","propertyType":"list(int)","children":["int"]},{"propertyName":"after","propertyType":"object","children":[{"propertyName":"x","propertyType":"int"}]}]`)
+}
+
+// For shared-reference inputs that hit the budget, the output is byte-identical to the Node SDK's
+// parser. The digests are of Node's JSON.stringify output for the same inputs.
+func TestExtractSchema_BudgetMatchesNode(t *testing.T) {
+	objects := make(list, 10000)
+	for i := range objects {
+		objects[i] = om{{"i", i}}
+	}
+	for _, tc := range []struct {
+		name   string
+		input  OrderedMap
+		sha256 string
+	}{
+		{"fan-out 3", sharedDAG(3, 12), "0b64c37a4ceae43ca1b7cc4880db67ca94f134de0b4b76becbddd9c504f6860c"},
+		{"fan-out 4", sharedDAG(4, 12), "1bd7f603f6472235da57a3c711740890b9368566a95b7cfd25ac1d21ec8d1c09"},
+		{"10,000 objects", om{{"items", objects}}, "128e49642937e1ca0cc40e5f3c09268a5cde25f3d8f449735176e16f900e2597"},
+	} {
+		encoded, err := json.Marshal(extractSchema(tc.input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(encoded)
+		if got := hex.EncodeToString(digest[:]); got != tc.sha256 {
+			t.Errorf("%s: output differs from Node (sha256 %s, %d bytes)", tc.name, got, len(encoded))
+		}
 	}
 }

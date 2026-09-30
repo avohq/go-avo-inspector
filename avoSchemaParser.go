@@ -13,6 +13,11 @@ import (
 // deeper than this is reported as an "object" with empty children instead of being descended into.
 const maxSchemaDepth = 10
 
+// maxSchemaExpansions bounds the objects and lists expanded in one extraction. Shared references
+// that are not cycles can otherwise expand exponentially; past the budget, complex values are
+// reported as "object" like the depth cap.
+const maxSchemaExpansions = 10000
+
 // Property represents a schema of a single event property (SPEC.md §7.3.4).
 //
 // Children and ListChildren are disjoint: an "object" property carries its nested entries in
@@ -162,6 +167,8 @@ func extractSchema(eventProperties interface{}) []Property {
 // so a map holding itself under several keys cannot expand exponentially.
 type schemaParser struct {
 	ancestors []nodeIdentity
+	// expansions counts the objects and lists mapped so far, the root included.
+	expansions int
 }
 
 // nodeIdentity identifies a map or slice value. A slice is identified by its backing array, its
@@ -309,13 +316,14 @@ func propValueType(value interface{}, kind valueKind) string {
 }
 
 // visit decides how a complex value is mapped. It is a leaf, reported without descending into it,
-// when it is past the depth cap (SPEC.md §9.3.2) or is one of its own ancestors. Otherwise it
+// when it is past the depth cap (SPEC.md §9.3.2), when the expansion budget is spent, or when it is
+// one of its own ancestors. Otherwise it
 // returns the value's identity, computed once, to put on the ancestor path while descending.
 func (p *schemaParser) visit(value interface{}, kind valueKind, depth int) (leaf bool, id nodeIdentity) {
 	if kind != kindObject && kind != kindList {
 		return false, nodeIdentity{}
 	}
-	if depth >= maxSchemaDepth {
+	if depth >= maxSchemaDepth || p.expansions >= maxSchemaExpansions {
 		return true, nodeIdentity{}
 	}
 	id = identity(value)
@@ -346,7 +354,9 @@ func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) 
 	return result
 }
 
+// push counts an expansion and puts id on the ancestor path.
 func (p *schemaParser) push(id nodeIdentity) bool {
+	p.expansions++
 	if id.typ == nil {
 		return false
 	}

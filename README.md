@@ -172,6 +172,34 @@ result, err := avoInspector.TrackOrderedSchemaFromEvent("Signup", avoinspector.O
 
 `ExtractSchema` and `ExtractOrderedSchema` return the schema without sending anything.
 
+## Schema extraction limits
+
+Schema extraction runs on your goroutine, inside the tracking call. Without limits, a payload such as
+an ORM object or a full API response could make that work unbounded, so extraction stops expanding
+a value:
+
+- more than 10 levels deep, where each step into an object or into a list element counts as one
+  level;
+- that contains itself (a cycle);
+- once 10,000 objects and lists have been expanded in one call (the event properties object and
+  every list count).
+
+A property cut off this way is reported as `"object"` with empty `children`; a list element cut off
+this way is reported as the type string `"object"`. Strings, numbers and booleans never count toward
+the limits, whatever their size.
+
+For example, a map that refers to itself:
+
+```go
+order := map[string]interface{}{"id": 7}
+order["self"] = order
+avoInspector.ExtractSchema(map[string]interface{}{"order": order})
+// As JSON:
+// [{"propertyName":"order","propertyType":"object","children":[
+//   {"propertyName":"id","propertyType":"int"},
+//   {"propertyName":"self","propertyType":"object","children":[]}]}]
+```
+
 ## Flush and Destroy
 
 `Flush` sends the pending events and waits up to the given timeout for in-flight sends. Call it
@@ -202,6 +230,10 @@ These are the behaviour changes you may notice:
   `"list(<element type>)"` (typed by the first element, e.g. `"list(string)"`) instead of `"list"`.
   Typed slices and maps such as `[]string` or `map[string]string` are now read as lists and objects
   instead of `"unknown"`.
+- **Schema extraction is bounded.** v1 descended without limit, so a map that contained itself
+  recursed until the stack overflowed. Values deeper than 10 levels, cycles, and values past 10,000
+  expanded objects and lists per call are now reported as `"object"` (see
+  [Schema extraction limits](#schema-extraction-limits)).
 - **Property order is sorted.** A `map[string]interface{}` is listed sorted by key; in v1.0.0 the
   order was random. Use `OrderedMap` to choose the order.
 - **`error` no longer reports HTTP failures.** `TrackSchemaFromEvent` returns an error only for an
