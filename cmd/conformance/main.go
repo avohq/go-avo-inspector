@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -39,6 +40,9 @@ type stepRecord struct {
 	Outcome string      `json:"outcome"`
 	Value   interface{} `json:"value"`
 }
+
+// maxTimeoutMs is the largest flush timeoutMs a time.Duration holds.
+const maxTimeoutMs = float64(math.MaxInt64 / int64(time.Millisecond))
 
 // configError is an envelope problem: exit code 2.
 type configError struct{ message string }
@@ -231,7 +235,11 @@ func runSequence(inspector *avoinspector.AvoInspector, envelope avoinspector.Ord
 			records = append(records, stepRecord{"trackN", "resolve", int(count)})
 		case "flush":
 			timeout := avoinspector.DefaultFlushTimeout
-			if ms, ok := getNumber(step, "timeoutMs"); ok {
+			if value, _ := get(step, "timeoutMs"); value != nil {
+				ms, ok := toFloat(value)
+				if !ok || !(ms >= 0 && ms <= maxTimeoutMs) {
+					return nil, configError{"flush timeoutMs must be a number from 0 to " + strconv.FormatInt(int64(maxTimeoutMs), 10)}
+				}
 				timeout = time.Duration(ms * float64(time.Millisecond))
 			}
 			_ = inspector.Flush(timeout)

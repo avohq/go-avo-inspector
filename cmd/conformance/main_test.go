@@ -60,3 +60,20 @@ func TestHarness_AcceptsNullInputForExtractSchema(t *testing.T) {
 		t.Fatalf("exit code %d: %s", code, stdout.String())
 	}
 }
+
+// A flush timeoutMs that is not a non-negative number within time.Duration's range is a
+// configuration error, not a silently different timeout.
+func TestHarness_ValidatesFlushTimeoutMs(t *testing.T) {
+	for timeoutMs, want := range map[string]int{
+		`-1`: 2, `1e13`: 2, `1e30`: 2, `99999999999999999999`: 2, `"5"`: 2,
+		`0`: 0, `5`: 0, `2.5`: 0, `null`: 0,
+	} {
+		input := `{"suite":"batching","fixture_id":"t","operation":"sequence",` +
+			`"constructor":{"apiKey":"k","env":"dev","version":"1"},` +
+			`"steps":[{"action":"flush","timeoutMs":` + timeoutMs + `}]}` + "\n"
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(input), &stdout); code != want {
+			t.Errorf("timeoutMs %s: exit code %d, want %d: %s", timeoutMs, code, want, stdout.String())
+		}
+	}
+}
