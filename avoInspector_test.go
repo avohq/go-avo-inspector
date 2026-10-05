@@ -1285,14 +1285,15 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 // An event with an empty or whitespace-only name is sent like any other, named
 // "Missing Event Name", and reported by an always-on, rate-limited line.
 func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
-	// Prod is left out: a prod instance ignores the mock endpoint, so it cannot send to the test
-	// server. The behaviour is the same in every environment.
 	for _, name := range []string{"", "  "} {
-		for _, env := range []AvoInspectorEnv{Dev, Staging} {
+		for _, env := range []AvoInspectorEnv{Dev, Staging, Prod} {
 			t.Run(fmt.Sprintf("%q/%s", name, env), func(t *testing.T) {
 				logs := captureLogs(t)
 				advance := fakeLogClock(t)
 				server := newTestServer(t, nil)
+				// A prod instance ignores the mock endpoint, so point its endpoint at the test server.
+				trackingEndpoint = server.URL
+				t.Cleanup(func() { trackingEndpoint = "http://127.0.0.1:1" })
 				inspector := mustInspector(t, Options{Env: env, BatchSize: 1, DisableBatchTimer: true})
 				inspector.EnableLogging(false)
 				schema, err := inspector.TrackSchemaFromEvent(name, map[string]interface{}{"a": 1})
