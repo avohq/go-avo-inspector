@@ -81,7 +81,12 @@ func run(stdin io.Reader, stdout io.Writer) int {
 		writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "missing constructor object")
 		return 2
 	}
-	inspector, err := avoinspector.NewAvoInspectorWithOptions(constructorOptions(constructorMap))
+	options, err := constructorOptions(constructorMap)
+	if err != nil {
+		writeEnvelope(stdout, &fixtureID, false, nil, "resolve", err.Error())
+		return 2
+	}
+	inspector, err := avoinspector.NewAvoInspectorWithOptions(options)
 	if err != nil {
 		writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "Constructor threw: "+err.Error())
 		return 1
@@ -131,26 +136,29 @@ func run(stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
-func constructorOptions(constructor avoinspector.OrderedMap) avoinspector.Options {
+// constructorOptions maps the constructor block to Options. A batchSize or maxQueueSize that is
+// not an integer is a configError.
+func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Options, error) {
 	options := avoinspector.Options{}
 	options.ApiKey, _ = getString(constructor, "apiKey")
 	env, _ := getString(constructor, "env")
 	options.Env = avoinspector.AvoInspectorEnv(env)
 	options.AppVersion, _ = getString(constructor, "version")
 	options.AppName, _ = getString(constructor, "appName")
-	if value, ok := getNumber(constructor, "batchSize"); ok {
-		options.BatchSize = int(value)
+	var err error
+	if options.BatchSize, err = getInt(constructor, "batchSize"); err != nil {
+		return options, err
 	}
 	if value, ok := getNumber(constructor, "batchFlushSeconds"); ok {
 		options.BatchFlushSeconds = value
 	}
-	if value, ok := getNumber(constructor, "maxQueueSize"); ok {
-		options.MaxQueueSize = int(value)
+	if options.MaxQueueSize, err = getInt(constructor, "maxQueueSize"); err != nil {
+		return options, err
 	}
 	if value, ok := get(constructor, "disableBatchTimer"); ok {
 		options.DisableBatchTimer, _ = value.(bool)
 	}
-	return options
+	return options, nil
 }
 
 func applyPreconditions(inspector *avoinspector.AvoInspector, envelope avoinspector.OrderedMap) error {
@@ -351,6 +359,20 @@ func getString(object avoinspector.OrderedMap, key string) (string, bool) {
 	value, _ := get(object, key)
 	s, ok := value.(string)
 	return s, ok
+}
+
+// getInt returns an integer field, or 0 when it is absent or null. Any other value that is not a
+// whole number within int64 range is a configError.
+func getInt(object avoinspector.OrderedMap, key string) (int, error) {
+	value, _ := get(object, key)
+	if value == nil {
+		return 0, nil
+	}
+	number, ok := toFloat(value)
+	if !ok || number != math.Trunc(number) || number < math.MinInt64 || number >= math.MaxInt64 {
+		return 0, configError{key + " must be an integer"}
+	}
+	return int(number), nil
 }
 
 func getNumber(object avoinspector.OrderedMap, key string) (float64, bool) {

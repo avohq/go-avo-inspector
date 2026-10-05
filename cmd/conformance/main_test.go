@@ -77,3 +77,22 @@ func TestHarness_ValidatesFlushTimeoutMs(t *testing.T) {
 		}
 	}
 }
+
+// batchSize and maxQueueSize are integers (runner contract, constructor fields): a fractional,
+// out-of-range or non-numeric value is a configuration error, not a silently truncated option.
+// An integer below 1 still reaches the SDK, which falls back to the default with a warning.
+func TestHarness_ValidatesIntegerConstructorOptions(t *testing.T) {
+	for _, key := range []string{"batchSize", "maxQueueSize"} {
+		for value, want := range map[string]int{
+			`2.5`: 2, `1e30`: 2, `99999999999999999999`: 2, `"3"`: 2,
+			`3`: 0, `3.0`: 0, `-1`: 0, `0`: 0, `null`: 0,
+		} {
+			input := `{"suite":"schema-extraction","fixture_id":"c","constructor":{"apiKey":"k","env":"dev","version":"1","` +
+				key + `":` + value + `},"input":{"a":1}}` + "\n"
+			var stdout bytes.Buffer
+			if code := run(strings.NewReader(input), &stdout); code != want {
+				t.Errorf("%s %s: exit code %d, want %d: %s", key, value, code, want, stdout.String())
+			}
+		}
+	}
+}
