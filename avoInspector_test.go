@@ -1281,3 +1281,51 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 		t.Errorf("expected every sender slot freed, %d still taken", active)
 	}
 }
+
+// An event with an empty or whitespace-only name is sent like any other, named
+// "Missing Event Name", and reported by an always-on, rate-limited line.
+func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
+	// Prod is left out: a prod instance ignores the mock endpoint, so it cannot send to the test
+	// server. The behaviour is the same in every environment.
+	for _, name := range []string{"", "  "} {
+		for _, env := range []AvoInspectorEnv{Dev, Staging} {
+			t.Run(fmt.Sprintf("%q/%s", name, env), func(t *testing.T) {
+				logs := captureLogs(t)
+				advance := fakeLogClock(t)
+				server := newTestServer(t, nil)
+				inspector := mustInspector(t, Options{Env: env, BatchSize: 1, DisableBatchTimer: true})
+				inspector.EnableLogging(false)
+				schema, err := inspector.TrackSchemaFromEvent(name, map[string]interface{}{"a": 1})
+				if err != nil || len(schema) != 1 || schema[0].PropertyName != "a" || schema[0].PropertyType != "int" {
+					t.Errorf("expected the extracted schema and no error, got (%#v, %v)", schema, err)
+				}
+				_ = inspector.Flush(time.Second)
+				requests := server.captured()
+				if len(requests) != 1 || requests[0].events[0]["eventName"] != "Missing Event Name" {
+					t.Fatalf("expected one event named \"Missing Event Name\", got %v", requests)
+				}
+				properties := requests[0].events[0]["eventProperties"].([]interface{})
+				if len(properties) != 1 || properties[0].(map[string]interface{})["propertyType"] != "int" {
+					t.Errorf("unexpected eventProperties %v", properties)
+				}
+				line := `[Avo Inspector] 1 event(s) tracked without an event name in the last 10s, sent as "Missing Event Name".`
+				if n := countLines(logs(), line); n != 1 {
+					t.Errorf("expected one line, got %d:\n%s", n, logs())
+				}
+				_, _ = inspector.TrackSchemaFromEvent(name, nil)
+				advance(logRateWindow)
+				_, _ = inspector.TrackSchemaFromEvent(name, nil)
+				if !strings.Contains(logs(), `[Avo Inspector] 2 event(s) tracked without an event name in the last 10s, sent as "Missing Event Name".`) {
+					t.Errorf("expected the suppressed one counted in the next window:\n%s", logs())
+				}
+			})
+		}
+	}
+
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	schema, err := inspector.TrackSchemaFromEvent(" Signed Up ", map[string]interface{}{"a": 1})
+	if err != nil || len(schema) != 1 || len(server.captured()) != 1 || server.captured()[0].events[0]["eventName"] != " Signed Up " {
+		t.Errorf("a valid name must be tracked unchanged, got (%#v, %v)", schema, err)
+	}
+}

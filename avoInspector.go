@@ -53,6 +53,10 @@ const (
 	logPrefix                 = "[Avo Inspector] "
 )
 
+// MissingEventName is the name an event is sent with when it is tracked with an empty or
+// whitespace-only name.
+const MissingEventName = "Missing Event Name"
+
 // DefaultFlushTimeout is how long Flush waits for in-flight sends when given a negative timeout,
 // and a sensible value to pass before the process exits.
 const DefaultFlushTimeout = 10 * time.Second
@@ -284,7 +288,8 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 // It returns the extracted schema. The returned error is non-nil only for an internal failure
 // before the event was queued; delivery failures are never returned. With a batch size of 1
 // (always in Dev) the event is sent before returning, and a non-200 response returns an empty
-// schema. After Destroy it returns an empty schema and sends nothing.
+// schema. After Destroy it returns an empty schema and sends nothing. An event whose name is empty
+// or whitespace is sent as MissingEventName, and a rate-limited line reports it.
 func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, options TrackOptions) ([]Property, error) {
 	return inspector.track(eventName, eventProperties, options)
 }
@@ -310,6 +315,12 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		}
 	}()
 
+	if strings.TrimSpace(eventName) == "" {
+		eventName = MissingEventName
+		logLimited("missing-event-name", 1, func(total, _ int) string {
+			return fmt.Sprintf("%d event(s) tracked without an event name in the last 10s, sent as %q.", total, MissingEventName)
+		})
+	}
 	schema = safeExtractSchema(eventProperties)
 	streamId := options.StreamId
 	if strings.Contains(streamId, ":") {
