@@ -143,12 +143,13 @@ Data loss is always logged, whatever this setting:
 | Events dropped because more than 10,000 wait to be sent | `dropped N event(s) (send backlog full) in the last 10s.` |
 | Batches rejected with a non-200 response | `N batch(es) rejected with HTTP <status> in the last 10s.` |
 | Failed sends (network error, timeout, refused send) | `schema sending failed: Request failed.` or `Request timed out.` |
-| Internal errors | `internal error: ...` |
+| Internal errors | `internal error: <type>`, for example `internal error: *errors.errorString` |
 
 Each kind, and each reason or status within it, prints at most one line per 10 seconds: the first
 occurrence prints at once, later ones are counted, and the count is reported with the next line of
 that kind. The warning for a `StreamId` containing `:` is rate-limited the same way. Response bodies
-are never logged. Everything else, such as events dropped by sampling
+are never logged, and a caught error or panic is logged by its type only, never its message, which
+can carry data from your events. Everything else, such as events dropped by sampling
 and per-event debug lines, is logged only when logging is enabled. Sends abandoned by `Destroy` are
 not logged.
 

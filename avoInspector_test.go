@@ -481,8 +481,9 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 		if err == nil || err.Error() != internalErrorMessage || schema != nil {
 			t.Fatalf("expected the internal error, got (%#v, %v)", schema, err)
 		}
-		if output := logs(); !strings.Contains(output, "internal error: boom") || strings.Contains(output, apiKey) {
-			t.Errorf("expected an internal error log without the apiKey, got %q", output)
+		output := logs()
+		if !strings.Contains(output, "internal error: string") || strings.Contains(output, "boom") || strings.Contains(output, apiKey) {
+			t.Errorf("expected an internal error logged by type, without its message or the apiKey, got %q", output)
 		}
 	})
 }
@@ -1174,5 +1175,57 @@ func TestSendModel_DestroyDiscardsWaitingBatches(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if n := len(server.captured()); n != 4 {
 		t.Errorf("expected only the 4 in-flight batches to reach the server, got %d", n)
+	}
+}
+
+// markerValue panics with a marker from String and MarshalJSON, standing in for a user type whose
+// methods carry personal data.
+type markerValue struct{}
+
+func (markerValue) String() string               { panic("PII-MARKER-777@example.com") }
+func (markerValue) MarshalJSON() ([]byte, error) { panic("PII-MARKER-777@example.com") }
+
+// Caught panics and errors are logged by their type only, never their value or message, which can
+// carry user data.
+func TestLogging_CaughtErrorsAreLoggedByTypeOnly(t *testing.T) {
+	const marker = "PII-MARKER-777"
+	logs := captureLogs(t)
+	newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	inspector.EnableLogging(true)
+
+	// User methods are never called by extraction, so a panicking String or MarshalJSON is inert.
+	if _, err := inspector.TrackSchemaFromEvent("E", map[string]interface{}{"v": markerValue{}, "p": &markerValue{}}); err != nil {
+		t.Errorf("tracking a value with panicking methods failed: %v", err)
+	}
+
+	// A panic before enqueue is reported as an internal error, by type only.
+	previous := newGuid
+	newGuid = func() string { panic(fmt.Errorf("guid failed for %s", "PII-MARKER-777@example.com")) }
+	t.Cleanup(func() { newGuid = previous })
+	if _, err := inspector.TrackSchemaFromEvent("E", nil); err == nil || err.Error() != internalErrorMessage {
+		t.Fatalf("expected the internal error, got %v", err)
+	}
+
+	output := logs()
+	if strings.Contains(output, marker) {
+		t.Errorf("a caught error's message reached the log:\n%s", output)
+	}
+	if !strings.Contains(output, "internal error: *fmt.wrapError") && !strings.Contains(output, "internal error: *errors.errorString") {
+		t.Errorf("expected the internal error logged by type:\n%s", output)
+	}
+}
+
+// A batch that cannot be serialized is logged with a fixed label, not the encoder's message.
+func TestLogging_SerializationFailureUsesAFixedLabel(t *testing.T) {
+	logs := captureLogs(t)
+	newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	inspector.EnableLogging(false)
+	inspector.setSamplingRate(math.NaN()) // NaN keeps the event and cannot be encoded as JSON
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	output := logs()
+	if !strings.Contains(output, "schema sending failed: Request serialization failed.") || strings.Contains(output, "json:") {
+		t.Errorf("expected the fixed serialization label:\n%s", output)
 	}
 }

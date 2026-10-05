@@ -710,10 +710,11 @@ func logFailedSend(err error) {
 	})
 }
 
-// logInternalError reports a recovered internal error.
+// logInternalError reports a recovered internal error by its type only (for example
+// "*errors.errorString"): a panic value or error message can carry user data.
 func logInternalError(context string, recovered interface{}) {
 	logLimited("internal:"+context, 1, func(_, suppressed int) string {
-		return fmt.Sprintf("%s: %v%s", context, recovered, suppressedSuffix(suppressed))
+		return fmt.Sprintf("%s: %T%s", context, recovered, suppressedSuffix(suppressed))
 	})
 }
 

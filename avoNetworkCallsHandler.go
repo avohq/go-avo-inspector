@@ -105,6 +105,8 @@ var (
 	errRequestTimeout = errors.New("Request timed out")
 	errRequestFailed  = errors.New("Request failed")
 	errRequestAborted = errors.New("Request abandoned (destroyed)")
+	// errSerialization replaces the encoder's own message, which quotes the value it rejected.
+	errSerialization = errors.New("Request serialization failed")
 )
 
 // AvoNetworkCallsHandler sends batches of events to the Inspector API (SPEC.md §7).
@@ -163,7 +165,7 @@ func (h *AvoNetworkCallsHandler) send(ctx context.Context, events []wireEvent) s
 
 	payload, err := json.Marshal(events)
 	if err != nil {
-		return sendResult{status: sendFailed, err: err}
+		return sendResult{status: sendFailed, err: errSerialization}
 	}
 	gzipped := false
 	if len(payload) >= gzipThresholdBytes {
