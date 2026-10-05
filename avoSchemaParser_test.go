@@ -556,13 +556,25 @@ func TestExtractSchema_LargeScalarListsAllocateLittle(t *testing.T) {
 	for name, value := range map[string]interface{}{
 		"[]float64": floats, "[]byte": make([]byte, n), "[]interface{}": boxed,
 	} {
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		extractSchema(om{{"v", value}})
-		runtime.ReadMemStats(&after)
-		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
-			t.Errorf("%s of %d elements: allocated %d bytes, want at most 1 MiB", name, n, allocated)
+		input := om{{"v", value}}
+		if allocated := bytesPerRun(5, func() { extractSchema(input) }); allocated > 1<<20 {
+			t.Errorf("%s of %d elements: allocated %d bytes per run, want at most 1 MiB", name, n, allocated)
 		}
 	}
+}
+
+// bytesPerRun is testing.AllocsPerRun for bytes: it averages the bytes allocated over runs calls of
+// f, after one warm-up call, with GOMAXPROCS set to 1 so other goroutines barely run meanwhile.
+// Bytes, not an allocation count, catch every regression: for a []interface{} the old parser made
+// two allocations the size of the list, not one per element.
+func bytesPerRun(runs int, f func()) uint64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	f()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }
