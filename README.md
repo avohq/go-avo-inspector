@@ -141,6 +141,7 @@ Data loss is always logged, whatever this setting:
 |---|---|
 | Events dropped because the buffer is full (`MaxQueueSize`) | `dropped N event(s) (queue full) in the last 10s.` |
 | Events dropped because more than 10,000 wait to be sent | `dropped N event(s) (send backlog full) in the last 10s.` |
+| Events in a batch whose send hit an internal error | `dropped N event(s) (internal error) in the last 10s.`, after `send error: <type>` |
 | Batches rejected with a non-200 response | `N batch(es) rejected with HTTP <status> in the last 10s.` |
 | Failed sends (network error, timeout, refused send) | `schema sending failed: Request failed.` or `Request timed out.` |
 | Internal errors | `internal error: <type>`, for example `internal error: *errors.errorString` |

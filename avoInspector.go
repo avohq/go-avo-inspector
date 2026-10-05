@@ -498,15 +498,37 @@ func (inspector *AvoInspector) runSender(batch *queuedBatch) {
 	}
 }
 
-// send posts one batch outside the lock and finishes it.
+// post sends one batch. A panic inside it is recovered and logged as an internal error by type,
+// and posted is false, so the sender goes on and its slot is freed.
+func (inspector *AvoInspector) post(batch *queuedBatch) (res sendResult, posted bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logInternalError("send error", recovered)
+			posted = false
+		}
+	}()
+	if testHookInSend != nil {
+		testHookInSend()
+	}
+	return inspector.avoNetworkCallsHandler.send(inspector.ctx, batch.events), true
+}
+
+// send posts one batch outside the lock and finishes it. A batch whose post panicked counts as
+// dropped.
 func (inspector *AvoInspector) send(batch *queuedBatch) {
-	res := inspector.avoNetworkCallsHandler.send(inspector.ctx, batch.events)
+	res, posted := inspector.post(batch)
 	inspector.mu.Lock()
-	if res.status == sendOk && res.samplingRate != nil {
+	if posted && res.status == sendOk && res.samplingRate != nil {
 		inspector.samplingRate = *res.samplingRate
 	}
 	delete(inspector.inFlight, batch.id)
 	inspector.mu.Unlock()
+	if !posted {
+		logDropped(len(batch.events), "internal error")
+		close(batch.result)
+		close(batch.done)
+		return
+	}
 	// SPEC.md §7.5, §12.5: a failed batch is logged and dropped, never re-queued or retried.
 	switch res.status {
 	case sendOk:
@@ -643,6 +665,10 @@ func (inspector *AvoInspector) setSamplingRate(rate float64) {
 	inspector.samplingRate = rate
 	inspector.mu.Unlock()
 }
+
+// testHookInSend, when set by a test, runs inside a sender just before a batch is posted. It is
+// always nil outside tests.
+var testHookInSend func()
 
 // testHookBeforeSend, when set by a test, runs after a size-triggered batch has left the buffer
 // and before its send starts. It is always nil outside tests.

@@ -1229,3 +1229,55 @@ func TestLogging_SerializationFailureUsesAFixedLabel(t *testing.T) {
 		t.Errorf("expected the fixed serialization label:\n%s", output)
 	}
 }
+
+// A panic inside a send is recovered: it is logged by type as an internal error, the batch counts
+// as dropped, the sender slot is freed, Flush returns, and later batches still send.
+func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
+	logs := captureLogs(t)
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	var mu sync.Mutex
+	panics := 0
+	testHookInSend = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if panics < maxConcurrentSends+1 {
+			panics++
+			panic(fmt.Errorf("send failed for %s", "PII-MARKER-888@example.com"))
+		}
+	}
+	t.Cleanup(func() { testHookInSend = nil })
+
+	// Enough panicking batches to occupy every sender slot more than once.
+	for i := 0; i < 2*(maxConcurrentSends+1); i++ {
+		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("Lost%d", i), nil)
+	}
+	if err := inspector.Flush(2 * time.Second); err != nil {
+		t.Fatalf("Flush after panicking sends: %v", err)
+	}
+	_, _ = inspector.TrackSchemaFromEvent("Later1", nil)
+	_, _ = inspector.TrackSchemaFromEvent("Later2", nil)
+	if err := inspector.Flush(2 * time.Second); err != nil {
+		t.Fatalf("Flush after recovery: %v", err)
+	}
+	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
+		t.Errorf("expected only the later batch delivered, got %v", names)
+	}
+	output := logs()
+	if countLines(output, "send error: *errors.errorString") != 1 {
+		t.Errorf("expected one rate-limited internal line for the panics:\n%s", output)
+	}
+	if !strings.Contains(output, "dropped 2 event(s) (internal error) in the last 10s.") {
+		t.Errorf("expected the panicked batch counted as dropped:\n%s", output)
+	}
+	if strings.Contains(output, "PII-MARKER-888") {
+		t.Errorf("the panic message reached the log:\n%s", output)
+	}
+	inspector.mu.Lock()
+	active := inspector.activeSenders
+	inspector.mu.Unlock()
+	if active != 0 {
+		t.Errorf("expected every sender slot freed, %d still taken", active)
+	}
+}
