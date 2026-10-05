@@ -199,7 +199,10 @@ func TestWire_GatewayOptions(t *testing.T) {
 
 func TestWire_MockEndpointIgnoredInProd(t *testing.T) {
 	t.Setenv(mockEndpointEnvVar, "http://attacker.example")
-	if got := newAvoNetworkCallsHandler("k", Prod).endpoint(); got != "https://api.avo.app/inspector/v2/track" {
+	if productionEndpoint != "https://api.avo.app/inspector/v2/track" {
+		t.Errorf("unexpected production endpoint %q", productionEndpoint)
+	}
+	if got := newAvoNetworkCallsHandler("k", Prod).endpoint(); got != trackingEndpoint {
 		t.Errorf("prod must ignore the mock endpoint, got %q", got)
 	}
 	if got := newAvoNetworkCallsHandler("k", Staging).endpoint(); got != "http://attacker.example" {
@@ -250,5 +253,18 @@ func TestWire_RedirectIsNotFollowed(t *testing.T) {
 	defer mu.Unlock()
 	if len(leaked) != 0 {
 		t.Errorf("the redirect was followed and sent api-key %q to another host", leaked)
+	}
+}
+
+// Under test, even a prod instance, which ignores the mock endpoint, cannot reach the real API:
+// TestMain points the production endpoint at a closed local port.
+func TestWire_TestsCannotReachTheRealAPI(t *testing.T) {
+	logs := captureLogs(t)
+	inspector := mustInspector(t, Options{Env: Prod, BatchSize: 1, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	start := time.Now()
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if !strings.Contains(logs(), "schema sending failed: Request failed.") || time.Since(start) > 2*time.Second {
+		t.Errorf("a prod send under test must fail fast against the closed port, got %q after %v", logs(), time.Since(start))
 	}
 }

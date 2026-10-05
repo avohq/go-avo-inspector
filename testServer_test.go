@@ -12,10 +12,13 @@ import (
 	"testing"
 )
 
-// TestMain points the mock endpoint at a closed local port, so a test that forgets to start a
-// test server can never reach the real Inspector API. Tests that need a server override it.
+// TestMain points both the mock endpoint and the production endpoint at a closed local port, so no
+// test can reach the real Inspector API: not one that forgets to start a test server, and not a
+// prod instance, which ignores the mock endpoint by design. Tests that need a server override the
+// mock endpoint.
 func TestMain(m *testing.M) {
 	os.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	trackingEndpoint = "http://127.0.0.1:1"
 	os.Exit(m.Run())
 }
 

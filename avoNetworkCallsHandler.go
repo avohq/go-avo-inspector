@@ -75,8 +75,14 @@ type wireEvent struct {
 	EventProperties []Property `json:"eventProperties"`
 }
 
+// productionEndpoint is where every prod instance sends (SPEC.md §7.1).
+const productionEndpoint = "https://api.avo.app/inspector/v2/track"
+
+// trackingEndpoint is the URL used when the mock endpoint does not apply. It is a variable only so
+// the package's tests can point it away from the real API; nothing outside the package can.
+var trackingEndpoint = productionEndpoint
+
 const (
-	trackingEndpoint   = "https://api.avo.app/inspector/v2/track"
 	mockEndpointEnvVar = "AVO_INSPECTOR_MOCK_ENDPOINT"
 	gzipThresholdBytes = 1024
 	requestTimeout     = 10 * time.Second
