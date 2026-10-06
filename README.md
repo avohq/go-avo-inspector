@@ -96,8 +96,10 @@ A negative value is invalid: it logs a warning and the default is used. `BatchFl
 86400 (24 hours) is capped at 86400 with a warning.
 
 A `BatchSize` of 1, in any environment, makes every tracking call send its event and wait for the
-response, as in `Dev`, and a non-200 response makes the call return an empty schema. When earlier
-batches are still being sent, that wait can take longer than the 10-second request timeout.
+response, as in `Dev`. Only a non-200 response makes the call return an empty schema; a network
+failure or timeout returns the schema, so a returned schema does not mean the event was delivered.
+When earlier batches are still being sent, that wait can take longer than the 10-second request
+timeout.
 
 `MaxQueueSize` bounds only the events buffered before a batch is formed. Batches already formed and
 waiting to be sent have their own limit (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
@@ -190,7 +192,8 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 `TrackSchemaFromEvent` returns the extracted schema. Since v2 its `error` only reports an
 internal failure before the event was queued; it is never an HTTP or network failure. A failed
 send is logged and its events are dropped, without retry. In `Dev`,
-where every event is sent before the call returns, a non-200 response returns an empty schema.
+where every event is sent before the call returns, a non-200 response returns an empty schema; a
+network failure or timeout still returns the schema.
 
 In v1 every call sent the event synchronously and returned the HTTP failure as `error`. Now
 events are batched (except in `Dev`) and sent in the background, so you must call `Flush` before
@@ -300,7 +303,7 @@ These are the behaviour changes you may notice:
   order was random. Use `OrderedMap` to choose the order.
 - **`error` no longer reports HTTP failures.** `TrackSchemaFromEvent` returns an error only for an
   internal failure before the event was queued. A failed send is logged and dropped. In `Dev`, a
-  non-200 response returns an empty schema.
+  non-200 response returns an empty schema; a network failure or timeout returns the schema.
 - **Events are buffered outside `Dev`.** In `Staging` and `Prod`, events are sent in batches in the
   background instead of during the call. Call `Flush` before the process exits, or buffered events
   are lost. `Dev` still sends each event before the call returns. At most 4 batches are sent at

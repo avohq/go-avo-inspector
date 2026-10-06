@@ -299,8 +299,8 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 //
 // It returns the extracted schema. The returned error is non-nil only for an internal failure
 // before the event was queued; delivery failures are never returned. With a batch size of 1
-// (always in Dev) the event is sent before returning, and a non-200 response returns an empty
-// schema. After Destroy it returns an empty schema and sends nothing. An event whose name is empty
+// (always in Dev) the event is sent before returning; a non-200 response returns an empty schema,
+// while a network failure or timeout still returns the schema. After Destroy it returns an empty schema and sends nothing. An event whose name is empty
 // or whitespace is sent as MissingEventName, and a rate-limited line reports it. While 1,000 or
 // more events wait to be sent, the call waits for room before returning, for at most about the
 // 10-second request timeout (backpressure); Destroy releases it.
