@@ -114,20 +114,31 @@ sends what is pending and waits for the sends in flight, so the job waits for th
 up. It does not prevent drops on its own. Between two calls nothing slows the job down, so if it
 tracks more than 10,000 events faster than 4 concurrent sends can take them, the oldest waiting
 events are dropped; keep the interval well below that. And `Flush` waits only up to its timeout:
-when it returns `ErrFlushTimeout`, sends are still running, so wait again before tracking more:
+when it returns `ErrFlushTimeout`, events are still waiting or in flight, so flush again before
+tracking more. Bound those retries, then give up and log:
 
 ```go
 for i, row := range rows {
 	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
 	if i%5000 == 4999 {
-		// Each request gives up after 10 seconds, so the backlog drains and this loop ends even
-		// when the endpoint is down.
-		for errors.Is(avoInspector.Flush(avoinspector.DefaultFlushTimeout), avoinspector.ErrFlushTimeout) {
+		drained := false
+		for attempt := 0; attempt < 6 && !drained; attempt++ {
+			drained = avoInspector.Flush(avoinspector.DefaultFlushTimeout) == nil
+		}
+		if !drained {
+			log.Print("Avo Inspector did not drain; waiting events may be dropped")
 		}
 	}
 }
 avoInspector.Flush(avoinspector.DefaultFlushTimeout)
 ```
+
+With a responsive endpoint the first `Flush` normally drains, and an unreachable one fails each
+request at once. Against a slow or hung endpoint each request gives up after 10 seconds, so every
+attempt shrinks the backlog, but draining a few thousand events can then take minutes, longer than
+the attempts allow. Tracking from other goroutines on the same inspector can also keep `Flush` from
+ever seeing it drained. That is why the loop is bounded rather than repeated until `Flush` returns
+`nil`.
 
 ## Enabling logs
 
