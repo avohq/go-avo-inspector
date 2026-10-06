@@ -1,6 +1,7 @@
 # Avo Inspector for Go
 
 Implements [avohq/spec-first-inspector-server-sdk](https://github.com/avohq/spec-first-inspector-server-sdk) v3.0.1 (`avoinspector.SpecVersion`).
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 > **Flush before your process exits.** Outside `Dev`, events are buffered in memory and sent in
 > batches. Events still buffered when the process exits are lost. Go has no exit hook the SDK could
