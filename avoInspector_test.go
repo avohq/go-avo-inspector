@@ -7,7 +7,9 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -865,7 +867,7 @@ func TestLogging_DroppedEventsAreRateLimited(t *testing.T) {
 	if n := countLines(logs(), "(queue full)"); n != 1 {
 		t.Fatalf("expected one dropped line in the window, got %d:\n%s", n, logs())
 	}
-	if !strings.Contains(logs(), "[Avo Inspector] dropped 1 event(s) (queue full) in the last 10s.") {
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 1 event(s) (queue full) in the last 1s.") {
 		t.Errorf("unexpected first line:\n%s", logs())
 	}
 	advance(logRateWindow)
@@ -908,7 +910,7 @@ func TestLogging_Non200IsRateLimitedPerStatus(t *testing.T) {
 	if countLines(output, "rejected with HTTP 500") != 1 || countLines(output, "rejected with HTTP 400") != 1 {
 		t.Fatalf("expected one line per status:\n%s", output)
 	}
-	if !strings.Contains(output, "[Avo Inspector] 1 batch(es) rejected with HTTP 500 in the last 10s.") {
+	if !strings.Contains(output, "[Avo Inspector] 1 batch(es) rejected with HTTP 500 in the last 1s.") {
 		t.Errorf("unexpected 500 line:\n%s", output)
 	}
 	advance(logRateWindow)
@@ -1154,8 +1156,15 @@ func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 			break
 		}
 	}
-	if n := countLines(logs(), "(send backlog full)"); n != 1 {
-		t.Errorf("expected one backlog drop line, got %d:\n%s", n, logs())
+	// One line during the burst, and Flush reports the rest; together they count every drop.
+	lines := regexp.MustCompile(`dropped (\d+) event\(s\) \(send backlog full\)`).FindAllStringSubmatch(logs(), -1)
+	droppedTotal := 0
+	for _, line := range lines {
+		n, _ := strconv.Atoi(line[1])
+		droppedTotal += n
+	}
+	if len(lines) != 2 || droppedTotal != total-len(expected) {
+		t.Errorf("expected two backlog drop lines counting %d drops, got %d lines counting %d:\n%s", total-len(expected), len(lines), droppedTotal, logs())
 	}
 }
 
@@ -1234,6 +1243,7 @@ func TestLogging_SerializationFailureUsesAFixedLabel(t *testing.T) {
 // as dropped, the sender slot is freed, Flush returns, and later batches still send.
 func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 	logs := captureLogs(t)
+	fakeLogClock(t)
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
@@ -1264,12 +1274,15 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
 		t.Errorf("expected only the later batch delivered, got %v", names)
 	}
+	// The first panic prints at once; Flush reports the other four and their 8 events.
 	output := logs()
-	if countLines(output, "send error: *errors.errorString") != 1 {
-		t.Errorf("expected one rate-limited internal line for the panics:\n%s", output)
+	if countLines(output, "send error: *errors.errorString") != 2 ||
+		!strings.Contains(output, "send error: *errors.errorString (4 more in the last 1s)") {
+		t.Errorf("expected one internal line, then Flush reporting the other 4 panics:\n%s", output)
 	}
-	if !strings.Contains(output, "dropped 2 event(s) (internal error) in the last 10s.") {
-		t.Errorf("expected the panicked batch counted as dropped:\n%s", output)
+	if !strings.Contains(output, "dropped 2 event(s) (internal error) in the last 1s.") ||
+		!strings.Contains(output, "dropped 8 event(s) (internal error) in the last 1s.") {
+		t.Errorf("expected the panicked batches counted as dropped:\n%s", output)
 	}
 	if strings.Contains(output, "PII-MARKER-888") {
 		t.Errorf("the panic message reached the log:\n%s", output)
@@ -1309,7 +1322,7 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 				if len(properties) != 1 || properties[0].(map[string]interface{})["propertyType"] != "int" {
 					t.Errorf("unexpected eventProperties %v", properties)
 				}
-				line := `[Avo Inspector] 1 event(s) tracked without an event name in the last 10s, sent as "Missing Event Name".`
+				line := `[Avo Inspector] 1 event(s) tracked without an event name in the last 1s, sent as "Missing Event Name".`
 				if n := countLines(logs(), line); n != 1 {
 					t.Errorf("expected one line, got %d:\n%s", n, logs())
 				}
@@ -1328,5 +1341,68 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 	schema, err := inspector.TrackSchemaFromEvent(" Signed Up ", map[string]interface{}{"a": 1})
 	if err != nil || len(schema) != 1 || len(server.captured()) != 1 || server.captured()[0].events[0]["eventName"] != " Signed Up " {
 		t.Errorf("a valid name must be tracked unchanged, got (%#v, %v)", schema, err)
+	}
+}
+
+// Flush prints the counts the rate limit is still holding, worded with the real time since the
+// window's first occurrence, so a burst followed by quiet is reported without waiting for the next
+// occurrence.
+func TestLogging_FlushReportsPendingCounts(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 10; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 1 event(s) (queue full) in the last 1s.") {
+		t.Fatalf("expected the first drop printed at once:\n%s", logs())
+	}
+	advance(3 * time.Second)
+	_ = inspector.Flush(0)
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 7 event(s) (queue full) in the last 3s.") {
+		t.Errorf("expected Flush to report the 7 suppressed drops over 3s:\n%s", logs())
+	}
+	if n := countLines(logs(), "(queue full)"); n != 2 {
+		t.Errorf("expected exactly two drop lines, got %d:\n%s", n, logs())
+	}
+	// The count was reset: another Flush prints nothing more.
+	before := logs()
+	_ = inspector.Flush(0)
+	if logs() != before {
+		t.Errorf("a second Flush printed again:\n%s", logs())
+	}
+}
+
+// A count reported long after its window began says how long it really covered.
+func TestLogging_StaleCountReportsItsRealSpan(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 10; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	advance(time.Hour)
+	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 8 event(s) (queue full) in the last 3600s.") {
+		t.Errorf("expected the real span of the stale count:\n%s", logs())
+	}
+}
+
+// Destroy reports pending counts too, including the suffix form used by failed sends.
+func TestLogging_DestroyReportsPendingCounts(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 1, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 5; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	advance(2 * time.Second)
+	inspector.Destroy()
+	if !strings.Contains(logs(), "[Avo Inspector] schema sending failed: Request failed. (4 more in the last 2s)") {
+		t.Errorf("expected Destroy to report the 4 suppressed failures:\n%s", logs())
 	}
 }

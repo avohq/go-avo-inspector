@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -317,15 +318,15 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 
 	if strings.TrimSpace(eventName) == "" {
 		eventName = MissingEventName
-		logLimited("missing-event-name", 1, func(total, _ int) string {
-			return fmt.Sprintf("%d event(s) tracked without an event name in the last 10s, sent as %q.", total, MissingEventName)
+		logLimited("missing-event-name", 1, func(total, _ int, seconds int64) string {
+			return fmt.Sprintf("%d event(s) tracked without an event name in the last %ds, sent as %q.", total, seconds, MissingEventName)
 		})
 	}
 	schema = safeExtractSchema(eventProperties)
 	streamId := options.StreamId
 	if strings.Contains(streamId, ":") {
-		logLimited("streamid-colon", 1, func(_, suppressed int) string {
-			return "streamId contains ':'; using the value verbatim." + suppressedSuffix(suppressed)
+		logLimited("streamid-colon", 1, func(_, suppressed int, seconds int64) string {
+			return "streamId contains ':'; using the value verbatim." + suppressedSuffix(suppressed, seconds)
 		})
 	}
 	if shouldLog.Load() {
@@ -564,6 +565,8 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 // usable. Delivery failures are not reported. Call Flush before the process or serverless handler
 // exits: pending events are otherwise lost.
 func (inspector *AvoInspector) Flush(timeout time.Duration) error {
+	// Report what the log rate limit is still holding, after the sends this call waited for.
+	defer flushLogCounts()
 	if timeout < 0 {
 		timeout = DefaultFlushTimeout
 	}
@@ -627,6 +630,7 @@ func (inspector *AvoInspector) Destroy() {
 	inspector.mu.Unlock()
 
 	inspector.cancel()
+	flushLogCounts()
 }
 
 // takePending swaps out the pending batch and disarms the flush timer. Call it with mu held.
@@ -689,8 +693,9 @@ var testHookBeforeSend func()
 const logRateWindow = 10 * time.Second
 
 // logLimiter rate-limits the always-on log lines. For each key (a kind, plus the reason or status
-// within it) it keeps when the last line was printed and how many occurrences were suppressed
-// since. It has no timer: suppressed counts are reported on the next occurrence of that key.
+// within it) it keeps when the current window began, how many occurrences were suppressed since,
+// and how to word that key's line. It has no timer: suppressed counts are reported on the next
+// occurrence after the window, or by Flush and Destroy (flushLogCounts).
 var logLimiter = struct {
 	sync.Mutex
 	entries map[string]*limitedLog
@@ -698,68 +703,107 @@ var logLimiter = struct {
 }{entries: map[string]*limitedLog{}, now: time.Now}
 
 type limitedLog struct {
-	printed    time.Time
-	suppressed int
+	windowStart time.Time
+	suppressed  int
+	line        logLine
 }
 
+// logLine words a limited line: total occurrences to report, how many of them were suppressed,
+// and the whole seconds they span.
+type logLine func(total, suppressed int, seconds int64) string
+
 // logLimited prints an always-on line for n occurrences under key, at most once per
-// logRateWindow. line receives the occurrences to report, n plus those suppressed since the last
-// line for key, and how many of them were suppressed.
-func logLimited(key string, n int, line func(total, suppressed int) string) {
+// logRateWindow. The line reports n plus the occurrences suppressed since the window began, over
+// the real time since then. time.Now carries a monotonic reading, so the span is monotonic.
+func logLimited(key string, n int, line logLine) {
 	logLimiter.Lock()
 	now := logLimiter.now()
 	entry, seen := logLimiter.entries[key]
-	if seen && now.Sub(entry.printed) < logRateWindow {
+	if seen && now.Sub(entry.windowStart) < logRateWindow {
 		entry.suppressed += n
+		entry.line = line
 		logLimiter.Unlock()
 		return
 	}
-	suppressed := 0
+	suppressed, seconds := 0, int64(1)
 	if seen {
-		suppressed = entry.suppressed
+		suppressed, seconds = entry.suppressed, wholeSeconds(now.Sub(entry.windowStart))
 	}
-	logLimiter.entries[key] = &limitedLog{printed: now}
+	logLimiter.entries[key] = &limitedLog{windowStart: now, line: line}
 	logLimiter.Unlock()
-	logf("%s", line(n+suppressed, suppressed))
+	logf("%s", line(n+suppressed, suppressed, seconds))
 }
 
-// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize) or
-// "send backlog full" (maxWaitingEvents).
+// flushLogCounts prints the line of every key holding suppressed occurrences and resets it. Flush
+// and Destroy call it, so a burst followed by quiet is still reported.
+func flushLogCounts() {
+	logLimiter.Lock()
+	now := logLimiter.now()
+	keys := make([]string, 0, len(logLimiter.entries))
+	for key, entry := range logLimiter.entries {
+		if entry.suppressed > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		entry := logLimiter.entries[key]
+		lines = append(lines, entry.line(entry.suppressed, entry.suppressed, wholeSeconds(now.Sub(entry.windowStart))))
+		delete(logLimiter.entries, key)
+	}
+	logLimiter.Unlock()
+	for _, line := range lines {
+		logf("%s", line)
+	}
+}
+
+// wholeSeconds is the whole seconds in d, at least 1.
+func wholeSeconds(d time.Duration) int64 {
+	if seconds := int64(d / time.Second); seconds > 1 {
+		return seconds
+	}
+	return 1
+}
+
+// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize),
+// "send backlog full" (maxWaitingEvents) or "internal error" (a send that panicked).
 func logDropped(n int, reason string) {
-	logLimited("dropped:"+reason, n, func(total, _ int) string {
-		return fmt.Sprintf("dropped %d event(s) (%s) in the last 10s.", total, reason)
+	logLimited("dropped:"+reason, n, func(total, _ int, seconds int64) string {
+		return fmt.Sprintf("dropped %d event(s) (%s) in the last %ds.", total, reason, seconds)
 	})
 }
 
 // logRejected reports a batch answered with a non-200 status. Only the status is logged, never
 // the response body.
 func logRejected(status int) {
-	logLimited("non200:"+strconv.Itoa(status), 1, func(total, _ int) string {
-		return fmt.Sprintf("%d batch(es) rejected with HTTP %d in the last 10s.", total, status)
+	logLimited("non200:"+strconv.Itoa(status), 1, func(total, _ int, seconds int64) string {
+		return fmt.Sprintf("%d batch(es) rejected with HTTP %d in the last %ds.", total, status, seconds)
 	})
 }
 
-// logFailedSend reports a batch lost to a network error, a timeout or a refused send.
+// logFailedSend reports a batch lost to a network error, a timeout or a refused send. The errors
+// that reach it are the package's own fixed labels.
 func logFailedSend(err error) {
 	label := err.Error()
-	logLimited("failed:"+label, 1, func(_, suppressed int) string {
-		return "schema sending failed: " + label + "." + suppressedSuffix(suppressed)
+	logLimited("failed:"+label, 1, func(_, suppressed int, seconds int64) string {
+		return "schema sending failed: " + label + "." + suppressedSuffix(suppressed, seconds)
 	})
 }
 
 // logInternalError reports a recovered internal error by its type only (for example
 // "*errors.errorString"): a panic value or error message can carry user data.
 func logInternalError(context string, recovered interface{}) {
-	logLimited("internal:"+context, 1, func(_, suppressed int) string {
-		return fmt.Sprintf("%s: %T%s", context, recovered, suppressedSuffix(suppressed))
+	logLimited("internal:"+context, 1, func(_, suppressed int, seconds int64) string {
+		return fmt.Sprintf("%s: %T%s", context, recovered, suppressedSuffix(suppressed, seconds))
 	})
 }
 
-func suppressedSuffix(suppressed int) string {
+func suppressedSuffix(suppressed int, seconds int64) string {
 	if suppressed == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" (%d more in the last 10s)", suppressed)
+	return fmt.Sprintf(" (%d more in the last %ds)", suppressed, seconds)
 }
 
 // logOutput receives every log line; tests swap it under logMu.
