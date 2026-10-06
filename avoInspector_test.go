@@ -1406,3 +1406,43 @@ func TestLogging_DestroyReportsPendingCounts(t *testing.T) {
 		t.Errorf("expected Destroy to report the 4 suppressed failures:\n%s", logs())
 	}
 }
+
+// A panic after a batch is registered in flight but before its sender starts cannot strand it:
+// the batch is finished and counted as dropped, its sender slot is freed, Flush returns at once,
+// and later batches still send.
+func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
+	logs := captureLogs(t)
+	fakeLogClock(t)
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	testHookBeforeSend = func() {
+		testHookBeforeSend = nil
+		panic("before launch")
+	}
+	t.Cleanup(func() { testHookBeforeSend = nil })
+
+	_, _ = inspector.TrackSchemaFromEvent("Lost1", nil)
+	if _, err := inspector.TrackSchemaFromEvent("Lost2", nil); err == nil || err.Error() != internalErrorMessage {
+		t.Fatalf("expected the internal error from the panicking call, got %v", err)
+	}
+	start := time.Now()
+	if err := inspector.Flush(2 * time.Second); err != nil || time.Since(start) > 500*time.Millisecond {
+		t.Errorf("Flush waited on the stranded batch: %v after %v", err, time.Since(start))
+	}
+	inspector.mu.Lock()
+	active, inFlight := inspector.activeSenders, len(inspector.inFlight)
+	inspector.mu.Unlock()
+	if active != 0 || inFlight != 0 {
+		t.Errorf("expected the slot and the in-flight entry released, got %d senders and %d entries", active, inFlight)
+	}
+	_, _ = inspector.TrackSchemaFromEvent("Later1", nil)
+	_, _ = inspector.TrackSchemaFromEvent("Later2", nil)
+	_ = inspector.Flush(2 * time.Second)
+	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
+		t.Errorf("expected only the later batch delivered, got %v", names)
+	}
+	if !strings.Contains(logs(), "dropped 2 event(s) (internal error) in the last 1s.") {
+		t.Errorf("expected the stranded batch counted as dropped:\n%s", logs())
+	}
+}

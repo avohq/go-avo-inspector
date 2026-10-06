@@ -369,10 +369,21 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 	if batch == nil {
 		return schema, nil
 	}
+	launched := false
+	if startSender {
+		// The batch is registered in flight with a sender slot reserved. If anything below panics
+		// before launch starts that sender, finish the batch instead of stranding it.
+		defer func() {
+			if !launched {
+				inspector.abandonReserved(batch)
+			}
+		}()
+	}
 	if testHookBeforeSend != nil {
 		testHookBeforeSend()
 	}
 	inspector.launch(batch, startSender, backlogDropped)
+	launched = true
 	if inspector.batchSize == 1 {
 		// Immediate-send mode: the outcome of this call's own send is observable (SPEC.md §7.5).
 		if res, ok := <-batch.result; ok && res.status == sendNon200 {
@@ -488,6 +499,30 @@ func (inspector *AvoInspector) launch(batch *queuedBatch, startSender bool, drop
 	}
 	if startSender {
 		go inspector.runSender(batch)
+	}
+}
+
+// abandonReserved finishes a batch whose reserved sender was never started: it is removed from
+// inFlight, its channels are closed and it counts as dropped. The slot passes to the next waiting
+// batch, if any, so waiting batches are not stranded either; otherwise it is freed.
+func (inspector *AvoInspector) abandonReserved(batch *queuedBatch) {
+	inspector.mu.Lock()
+	delete(inspector.inFlight, batch.id)
+	var next *queuedBatch
+	if !inspector.destroyed && len(inspector.waiting) > 0 {
+		next = inspector.waiting[0]
+		inspector.waiting[0] = nil
+		inspector.waiting = inspector.waiting[1:]
+		inspector.waitingEvents -= len(next.events)
+	} else {
+		inspector.activeSenders--
+	}
+	inspector.mu.Unlock()
+	close(batch.result)
+	close(batch.done)
+	logDropped(len(batch.events), "internal error")
+	if next != nil {
+		go inspector.runSender(next)
 	}
 }
 
