@@ -109,10 +109,12 @@ At most 4 requests are sent at once. Batches formed while all 4 are busy wait th
 the number of events held for sending stays bounded when the endpoint is slow or down.
 
 A job that tracks events faster than the endpoint accepts them (for example a backfill loop) can
-fill that allowance. Call `Flush` every few thousand events so the job waits for the endpoint to
-catch up. `Flush` waits only up to its timeout: when it returns `ErrFlushTimeout`, sends are still
-running and the job is outpacing the endpoint, so wait again before tracking more, or the oldest
-waiting events can still be dropped:
+fill that allowance. Calling `Flush` every few thousand events bounds how many events pile up: it
+sends what is pending and waits for the sends in flight, so the job waits for the endpoint to catch
+up. It does not prevent drops on its own. Between two calls nothing slows the job down, so if it
+tracks more than 10,000 events faster than 4 concurrent sends can take them, the oldest waiting
+events are dropped; keep the interval well below that. And `Flush` waits only up to its timeout:
+when it returns `ErrFlushTimeout`, sends are still running, so wait again before tracking more:
 
 ```go
 for i, row := range rows {
