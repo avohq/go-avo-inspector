@@ -1128,7 +1128,7 @@ func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
 // the batches already in flight plus the newest 10,000, with one rate-limited drop line.
 func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 	logs := captureLogs(t)
-	fakeLogClock(t)
+	advance := fakeLogClock(t)
 	server, release, _ := hungServer(t)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
@@ -1137,6 +1137,8 @@ func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
 	}
 	release()
+	// Past the drop line's window, so Flush reports the drops held since.
+	advance(logRateWindow)
 	_ = inspector.Flush(10 * time.Second)
 
 	expected := map[string]bool{}
@@ -1156,7 +1158,8 @@ func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 			break
 		}
 	}
-	// One line during the burst, and Flush reports the rest; together they count every drop.
+	// One line during the burst, and Flush after the window reports the rest; together they count
+	// every drop.
 	lines := regexp.MustCompile(`dropped (\d+) event\(s\) \(send backlog full\)`).FindAllStringSubmatch(logs(), -1)
 	droppedTotal := 0
 	for _, line := range lines {
@@ -1243,7 +1246,7 @@ func TestLogging_SerializationFailureUsesAFixedLabel(t *testing.T) {
 // as dropped, the sender slot is freed, Flush returns, and later batches still send.
 func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 	logs := captureLogs(t)
-	fakeLogClock(t)
+	advance := fakeLogClock(t)
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
@@ -1268,20 +1271,22 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 	}
 	_, _ = inspector.TrackSchemaFromEvent("Later1", nil)
 	_, _ = inspector.TrackSchemaFromEvent("Later2", nil)
+	advance(logRateWindow)
 	if err := inspector.Flush(2 * time.Second); err != nil {
 		t.Fatalf("Flush after recovery: %v", err)
 	}
 	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
 		t.Errorf("expected only the later batch delivered, got %v", names)
 	}
-	// The first panic prints at once; Flush reports the other four and their 8 events.
+	// The first panic prints at once; the Flush after the window reports the other four and their 8
+	// events.
 	output := logs()
 	if countLines(output, "send error: *errors.errorString") != 2 ||
-		!strings.Contains(output, "send error: *errors.errorString (4 more in the last 1s)") {
+		!strings.Contains(output, "send error: *errors.errorString (4 more in the last 10s)") {
 		t.Errorf("expected one internal line, then Flush reporting the other 4 panics:\n%s", output)
 	}
 	if !strings.Contains(output, "dropped 2 event(s) (internal error) in the last 1s.") ||
-		!strings.Contains(output, "dropped 8 event(s) (internal error) in the last 1s.") {
+		!strings.Contains(output, "dropped 8 event(s) (internal error) in the last 10s.") {
 		t.Errorf("expected the panicked batches counted as dropped:\n%s", output)
 	}
 	if strings.Contains(output, "PII-MARKER-888") {
@@ -1344,10 +1349,10 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 	}
 }
 
-// Flush prints the counts the rate limit is still holding, worded with the real time since the
-// window's first occurrence, so a burst followed by quiet is reported without waiting for the next
-// occurrence.
-func TestLogging_FlushReportsPendingCounts(t *testing.T) {
+// Flush prints a count the rate limit is still holding only once that key's 10s window has
+// expired, so an app that flushes after every event keeps the rate limit. The line states the real
+// time since the window's first occurrence.
+func TestLogging_FlushReportsPendingCountsAfterTheWindow(t *testing.T) {
 	logs := captureLogs(t)
 	advance := fakeLogClock(t)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
@@ -1360,8 +1365,13 @@ func TestLogging_FlushReportsPendingCounts(t *testing.T) {
 	}
 	advance(3 * time.Second)
 	_ = inspector.Flush(0)
-	if !strings.Contains(logs(), "[Avo Inspector] dropped 7 event(s) (queue full) in the last 3s.") {
-		t.Errorf("expected Flush to report the 7 suppressed drops over 3s:\n%s", logs())
+	if n := countLines(logs(), "(queue full)"); n != 1 {
+		t.Fatalf("Flush inside the window must keep the count pending, got %d lines:\n%s", n, logs())
+	}
+	advance(logRateWindow)
+	_ = inspector.Flush(0)
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 7 event(s) (queue full) in the last 13s.") {
+		t.Errorf("expected Flush after the window to report the 7 held drops over 13s:\n%s", logs())
 	}
 	if n := countLines(logs(), "(queue full)"); n != 2 {
 		t.Errorf("expected exactly two drop lines, got %d:\n%s", n, logs())
@@ -1371,6 +1381,22 @@ func TestLogging_FlushReportsPendingCounts(t *testing.T) {
 	_ = inspector.Flush(0)
 	if logs() != before {
 		t.Errorf("a second Flush printed again:\n%s", logs())
+	}
+}
+
+// Destroy prints held counts at once, whether or not the window has expired.
+func TestLogging_DestroyReportsHeldDropsInsideTheWindow(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 10; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	}
+	advance(3 * time.Second)
+	inspector.Destroy()
+	if !strings.Contains(logs(), "[Avo Inspector] dropped 7 event(s) (queue full) in the last 3s.") {
+		t.Errorf("expected Destroy to report the 7 held drops over 3s:\n%s", logs())
 	}
 }
 

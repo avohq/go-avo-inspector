@@ -604,8 +604,8 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 // usable. Delivery failures are not reported. Call Flush before the process or serverless handler
 // exits: pending events are otherwise lost.
 func (inspector *AvoInspector) Flush(timeout time.Duration) error {
-	// Report what the log rate limit is still holding, after the sends this call waited for.
-	defer flushLogCounts()
+	// Report held log counts whose window has expired, after the sends this call waited for.
+	defer flushLogCounts(true)
 	if timeout < 0 {
 		timeout = DefaultFlushTimeout
 	}
@@ -669,7 +669,7 @@ func (inspector *AvoInspector) Destroy() {
 	inspector.mu.Unlock()
 
 	inspector.cancel()
-	flushLogCounts()
+	flushLogCounts(false)
 }
 
 // takePending swaps out the pending batch and disarms the flush timer. Call it with mu held.
@@ -734,7 +734,8 @@ const logRateWindow = 10 * time.Second
 // logLimiter rate-limits the always-on log lines. For each key (a kind, plus the reason or status
 // within it) it keeps when the current window began, how many occurrences were suppressed since,
 // and how to word that key's line. It has no timer: suppressed counts are reported on the next
-// occurrence after the window, or by Flush and Destroy (flushLogCounts).
+// occurrence after the window, by Flush once the window has expired, or by Destroy
+// (flushLogCounts).
 var logLimiter = struct {
 	sync.Mutex
 	entries map[string]*limitedLog
@@ -773,14 +774,16 @@ func logLimited(key string, n int, line logLine) {
 	logf("%s", line(n+suppressed, suppressed, seconds))
 }
 
-// flushLogCounts prints the line of every key holding suppressed occurrences and resets it. Flush
-// and Destroy call it, so a burst followed by quiet is still reported.
-func flushLogCounts() {
+// flushLogCounts prints the line of every key holding suppressed occurrences and resets it, so a
+// burst followed by quiet is still reported. Flush passes expiredOnly, which skips keys whose window
+// is still open: an app that flushes after every event keeps the rate limit. Destroy reports
+// everything.
+func flushLogCounts(expiredOnly bool) {
 	logLimiter.Lock()
 	now := logLimiter.now()
 	keys := make([]string, 0, len(logLimiter.entries))
 	for key, entry := range logLimiter.entries {
-		if entry.suppressed > 0 {
+		if entry.suppressed > 0 && (!expiredOnly || now.Sub(entry.windowStart) >= logRateWindow) {
 			keys = append(keys, key)
 		}
 	}

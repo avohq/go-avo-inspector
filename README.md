@@ -149,8 +149,9 @@ Data loss is always logged, whatever this setting:
 
 Each kind, and each reason or status within it, prints at most one line per 10 seconds: the first
 occurrence prints at once, later ones are counted, and the count is reported with the next line of
-that kind, or by `Flush` or `Destroy`, whichever comes first. So a burst followed by quiet is still
-reported when you flush or destroy the inspector. "In the last Ns" is the real time the count
+that kind, by `Flush` once that kind's 10-second window has passed, or by `Destroy` at any time,
+whichever comes first. So a burst followed by quiet is still reported, while an app that calls
+`Flush` after every event keeps the rate limit. "In the last Ns" is the real time the count
 covers, in whole seconds since that window's first occurrence (at least 1): a count reported long
 after the burst says so. The warning for a `StreamId` containing `:` is rate-limited the same way. Response bodies
 are never logged, and a caught error or panic is logged by its type only, never its message, which
