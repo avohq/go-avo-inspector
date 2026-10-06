@@ -109,14 +109,19 @@ At most 4 requests are sent at once. Batches formed while all 4 are busy wait th
 the number of events held for sending stays bounded when the endpoint is slow or down.
 
 A job that tracks events faster than the endpoint accepts them (for example a backfill loop) can
-fill that allowance. Call `Flush` every few thousand events so events are not dropped for lack of
-room while they wait:
+fill that allowance. Call `Flush` every few thousand events so the job waits for the endpoint to
+catch up. `Flush` waits only up to its timeout: when it returns `ErrFlushTimeout`, sends are still
+running and the job is outpacing the endpoint, so wait again before tracking more, or the oldest
+waiting events can still be dropped:
 
 ```go
 for i, row := range rows {
 	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
 	if i%5000 == 4999 {
-		avoInspector.Flush(avoinspector.DefaultFlushTimeout)
+		// Each request gives up after 10 seconds, so the backlog drains and this loop ends even
+		// when the endpoint is down.
+		for errors.Is(avoInspector.Flush(avoinspector.DefaultFlushTimeout), avoinspector.ErrFlushTimeout) {
+		}
 	}
 }
 avoInspector.Flush(avoinspector.DefaultFlushTimeout)
