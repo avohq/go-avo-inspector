@@ -118,3 +118,53 @@ func TestHarness_ValidatesConstructorOptionTypes(t *testing.T) {
 		}
 	}
 }
+
+// input must be an object; only extractSchema may take an explicit null (runner contract,
+// "operation values and input shapes").
+func TestHarness_ValidatesInputShape(t *testing.T) {
+	// The valid trackSchemaFromEvent case sends from a dev instance: keep it off the real API.
+	t.Setenv("AVO_INSPECTOR_MOCK_ENDPOINT", "http://127.0.0.1:1/inspector/v2/track")
+	constructor := `"constructor":{"apiKey":"k","env":"dev","version":"1"}`
+	for _, tc := range []struct {
+		operation, input string
+		want             int
+	}{
+		{"", `3`, 2}, {"", `"x"`, 2}, {"", `[]`, 2}, {"", `null`, 0}, {"", `{"a":1}`, 0},
+		{"trackSchemaFromEvent", `null`, 2}, {"trackSchemaFromEvent", `[]`, 2}, {"trackSchemaFromEvent", `3`, 2},
+		{"trackSchemaFromEvent", `{"eventName":"e","eventProperties":{"a":1}}`, 0},
+	} {
+		envelope := `{"suite":"schema-extraction","fixture_id":"i",` + constructor + `,"input":` + tc.input + `}`
+		if tc.operation != "" {
+			envelope = `{"suite":"s","fixture_id":"i","operation":"` + tc.operation + `",` + constructor + `,"input":` + tc.input + `}`
+		}
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(envelope+"\n"), &stdout); code != tc.want {
+			t.Errorf("%s input %s: exit code %d, want %d: %s", tc.operation, tc.input, code, tc.want, stdout.String())
+		}
+	}
+}
+
+// apiKey, env and version are required strings (runner contract, constructor object): a missing or
+// non-string one is a configuration error. A present string, even blank, goes to the SDK, whose
+// own rejection is a harness invocation failure.
+func TestHarness_ValidatesRequiredConstructorFields(t *testing.T) {
+	for _, tc := range []struct {
+		constructor string
+		want        int
+	}{
+		{`{"env":"dev","version":"1"}`, 2},
+		{`{"apiKey":"k","version":"1"}`, 2},
+		{`{"apiKey":"k","env":"dev"}`, 2},
+		{`{"apiKey":3,"env":"dev","version":"1"}`, 2},
+		{`{"apiKey":"k","env":"dev","version":null}`, 2},
+		{`{"apiKey":"","env":"dev","version":"1"}`, 1},
+		{`{"apiKey":"k","env":"dev","version":" "}`, 1},
+		{`{"apiKey":"k","env":"dev","version":"1"}`, 0},
+	} {
+		envelope := `{"suite":"schema-extraction","fixture_id":"r","constructor":` + tc.constructor + `,"input":{"a":1}}` + "\n"
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(envelope), &stdout); code != tc.want {
+			t.Errorf("constructor %s: exit code %d, want %d: %s", tc.constructor, code, tc.want, stdout.String())
+		}
+	}
+}

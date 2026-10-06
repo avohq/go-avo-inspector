@@ -102,11 +102,18 @@ func run(stdin io.Reader, stdout io.Writer) int {
 		operation = "extractSchema"
 	}
 
-	// input is required except for sequence; an explicit null is present (fixture-8).
+	// input is a required object except for sequence; extractSchema also takes an explicit null
+	// (fixture-8).
 	input, hasInput := get(envelope, "input")
-	if !hasInput && (operation == "extractSchema" || operation == "trackSchemaFromEvent") {
-		writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "missing input")
-		return 2
+	if operation == "extractSchema" || operation == "trackSchemaFromEvent" {
+		if !hasInput {
+			writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "missing input")
+			return 2
+		}
+		if _, isObject := input.(avoinspector.OrderedMap); !isObject && !(input == nil && operation == "extractSchema") {
+			writeEnvelope(stdout, &fixtureID, false, nil, "resolve", "input must be an object")
+			return 2
+		}
 	}
 
 	var actual interface{}
@@ -136,17 +143,25 @@ func run(stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
-// constructorOptions maps the constructor block to Options. A batchSize or maxQueueSize that is
-// not an integer, a batchFlushSeconds that is not a number, or a disableBatchTimer that is not a
-// boolean is a configError; null is the same as absent.
+// constructorOptions maps the constructor block to Options. A missing or non-string apiKey, env or
+// version is a configError; a present string, even blank, is left to the SDK to validate. A
+// batchSize or maxQueueSize that is not an integer, a batchFlushSeconds that is not a number, or a
+// disableBatchTimer that is not a boolean is a configError; null is the same as absent.
 func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Options, error) {
 	options := avoinspector.Options{}
-	options.ApiKey, _ = getString(constructor, "apiKey")
-	env, _ := getString(constructor, "env")
-	options.Env = avoinspector.AvoInspectorEnv(env)
-	options.AppVersion, _ = getString(constructor, "version")
-	options.AppName, _ = getString(constructor, "appName")
 	var err error
+	if options.ApiKey, err = requireString(constructor, "apiKey"); err != nil {
+		return options, err
+	}
+	env, err := requireString(constructor, "env")
+	if err != nil {
+		return options, err
+	}
+	options.Env = avoinspector.AvoInspectorEnv(env)
+	if options.AppVersion, err = requireString(constructor, "version"); err != nil {
+		return options, err
+	}
+	options.AppName, _ = getString(constructor, "appName")
 	if options.BatchSize, err = getInt(constructor, "batchSize"); err != nil {
 		return options, err
 	}
@@ -368,6 +383,17 @@ func getString(object avoinspector.OrderedMap, key string) (string, bool) {
 	value, _ := get(object, key)
 	s, ok := value.(string)
 	return s, ok
+}
+
+// requireString returns a required string field, or a configError when it is missing or not a
+// string.
+func requireString(object avoinspector.OrderedMap, key string) (string, error) {
+	value, _ := get(object, key)
+	s, ok := value.(string)
+	if !ok {
+		return "", configError{"constructor " + key + " must be a string"}
+	}
+	return s, nil
 }
 
 // getInt returns an integer field, or 0 when it is absent or null. Any other value that is not a
