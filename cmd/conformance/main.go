@@ -137,7 +137,8 @@ func run(stdin io.Reader, stdout io.Writer) int {
 }
 
 // constructorOptions maps the constructor block to Options. A batchSize or maxQueueSize that is
-// not an integer is a configError.
+// not an integer, a batchFlushSeconds that is not a number, or a disableBatchTimer that is not a
+// boolean is a configError; null is the same as absent.
 func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Options, error) {
 	options := avoinspector.Options{}
 	options.ApiKey, _ = getString(constructor, "apiKey")
@@ -149,14 +150,22 @@ func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Optio
 	if options.BatchSize, err = getInt(constructor, "batchSize"); err != nil {
 		return options, err
 	}
-	if value, ok := getNumber(constructor, "batchFlushSeconds"); ok {
-		options.BatchFlushSeconds = value
+	if value, _ := get(constructor, "batchFlushSeconds"); value != nil {
+		seconds, ok := toFloat(value)
+		if !ok {
+			return options, configError{"batchFlushSeconds must be a number"}
+		}
+		options.BatchFlushSeconds = seconds
 	}
 	if options.MaxQueueSize, err = getInt(constructor, "maxQueueSize"); err != nil {
 		return options, err
 	}
-	if value, ok := get(constructor, "disableBatchTimer"); ok {
-		options.DisableBatchTimer, _ = value.(bool)
+	if value, _ := get(constructor, "disableBatchTimer"); value != nil {
+		disable, ok := value.(bool)
+		if !ok {
+			return options, configError{"disableBatchTimer must be a boolean"}
+		}
+		options.DisableBatchTimer = disable
 	}
 	return options, nil
 }
@@ -386,6 +395,10 @@ func toFloat(value interface{}) (float64, bool) {
 		return float64(v), true
 	case float64:
 		return v, true
+	case json.Number:
+		// An integer literal outside the int64 range (see decodeJSON).
+		f, err := strconv.ParseFloat(string(v), 64)
+		return f, err == nil
 	default:
 		return 0, false
 	}

@@ -96,3 +96,25 @@ func TestHarness_ValidatesIntegerConstructorOptions(t *testing.T) {
 		}
 	}
 }
+
+// batchFlushSeconds is a number and disableBatchTimer a boolean (runner contract, constructor
+// fields): any other present, non-null value is a configuration error, not a silent default.
+func TestHarness_ValidatesConstructorOptionTypes(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+		want       int
+	}{
+		{"batchFlushSeconds", `"2"`, 2}, {"batchFlushSeconds", `true`, 2}, {"batchFlushSeconds", `{}`, 2},
+		{"batchFlushSeconds", `2`, 0}, {"batchFlushSeconds", `2.5`, 0}, {"batchFlushSeconds", `0`, 0},
+		{"batchFlushSeconds", `-1`, 0}, {"batchFlushSeconds", `99999999999999999999`, 0}, {"batchFlushSeconds", `null`, 0},
+		{"disableBatchTimer", `"true"`, 2}, {"disableBatchTimer", `1`, 2}, {"disableBatchTimer", `[]`, 2},
+		{"disableBatchTimer", `true`, 0}, {"disableBatchTimer", `false`, 0}, {"disableBatchTimer", `null`, 0},
+	} {
+		input := `{"suite":"schema-extraction","fixture_id":"c","constructor":{"apiKey":"k","env":"dev","version":"1","` +
+			tc.key + `":` + tc.value + `},"input":{"a":1}}` + "\n"
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(input), &stdout); code != tc.want {
+			t.Errorf("%s %s: exit code %d, want %d: %s", tc.key, tc.value, code, tc.want, stdout.String())
+		}
+	}
+}
