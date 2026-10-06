@@ -262,11 +262,13 @@ avoInspector.ExtractSchema(map[string]interface{}{"order": order})
 ## Flush and Destroy
 
 `Flush` sends the pending events and waits up to the given timeout for in-flight sends. Call it
-before the process exits (see [Shutdown](#shutdown)). It always completes, and its error is
-informational: you may ignore it. It is `ErrFlushTimeout` when in-flight sends were still running
-when the timeout passed, and `nil` otherwise; in both cases the pending events were sent and the
-inspector stays usable. Delivery failures are never reported. `Flush(0)` sends the pending events
-without waiting for them and returns `nil`; a negative timeout waits up to `DefaultFlushTimeout`.
+before the process exits (see [Shutdown](#shutdown)). It always completes, and its error says
+whether it drained the inspector: `nil` when, as `Flush` returns, nothing is buffered, waiting or in
+flight, and `ErrFlushTimeout` otherwise, such as when the timeout passed first. In both cases the
+pending events were sent and the inspector stays usable, and you may ignore the error. Delivery
+failures are never reported. `Flush(0)` starts sending the pending events without waiting for them,
+so it returns `nil` only when there was nothing to send and nothing in flight; a negative timeout
+waits up to `DefaultFlushTimeout`. `Flush` on a destroyed inspector returns `nil`.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
 background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine

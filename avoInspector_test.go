@@ -490,8 +490,8 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 	})
 }
 
-// Flush(0) sends the pending events without waiting for them, as Node and Java do; a negative
-// timeout waits up to DefaultFlushTimeout.
+// Flush(0) sends the pending events without waiting for them, as Node and Java do, and reports
+// whether it drained: ErrFlushTimeout while a send is still in flight.
 func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 	release := make(chan struct{})
 	server := newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
@@ -499,9 +499,9 @@ func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
 	start := time.Now()
-	// Not waiting was asked for, so it is not a timeout.
-	if err := inspector.Flush(0); err != nil {
-		t.Errorf("expected nil from Flush(0) while the send is still in flight, got %v", err)
+	// The send it started is still in flight, so the instance was not drained.
+	if err := inspector.Flush(0); err != ErrFlushTimeout {
+		t.Errorf("expected ErrFlushTimeout from Flush(0) while the send is still in flight, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("Flush(0) waited %v", elapsed)
@@ -1470,5 +1470,27 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 	}
 	if !strings.Contains(logs(), "dropped 2 event(s) (internal error) in the last 1s.") {
 		t.Errorf("expected the stranded batch counted as dropped:\n%s", logs())
+	}
+}
+
+// Flush returns nil only when, as it returns, nothing is buffered, waiting or in flight: Flush(0)
+// on an empty instance, or once its sends have finished; and always on a destroyed instance.
+func TestFlush_NilMeansDrained(t *testing.T) {
+	newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	if err := inspector.Flush(0); err != nil {
+		t.Errorf("Flush(0) on an empty instance: expected nil, got %v", err)
+	}
+	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	if err := inspector.Flush(2 * time.Second); err != nil {
+		t.Errorf("Flush that waited for its send: expected nil, got %v", err)
+	}
+	if err := inspector.Flush(0); err != nil {
+		t.Errorf("Flush(0) once drained: expected nil, got %v", err)
+	}
+	_, _ = inspector.TrackSchemaFromEvent("E2", nil)
+	inspector.Destroy()
+	if err := inspector.Flush(0); err != nil {
+		t.Errorf("Flush on a destroyed instance: expected nil, got %v", err)
 	}
 }

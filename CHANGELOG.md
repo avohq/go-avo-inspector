@@ -10,7 +10,7 @@ New API:
 - **`TrackSchemaFromEventWithOptions(eventName, properties, TrackOptions)`**, where `TrackOptions` carries `StreamId`, `OutputReference`, `OriginHint` and `OriginAppVersion`. `TrackSchemaFromEvent` is the same call without options.
 - **`OrderedMap` and `KeyValue`**, to keep property order, with `TrackOrderedSchemaFromEvent` and `ExtractOrderedSchema`. A pointer to an `OrderedMap`, a named type based on it, and a bare `[]KeyValue` are read the same way, at the top level or nested.
 - **`ExtractSchema`** returns the schema without sending anything.
-- **`Flush(timeout)` and `Destroy()`.** `Flush` sends pending events and waits for in-flight sends; its error, `ErrFlushTimeout`, is informational. `Flush(0)` sends without waiting and returns `nil`; a negative timeout means `DefaultFlushTimeout` (10 seconds).
+- **`Flush(timeout)` and `Destroy()`.** `Flush` sends pending events and waits for in-flight sends. It returns `nil` only when, as it returns, nothing is buffered, waiting or in flight, and `ErrFlushTimeout` otherwise; the error is informational. `Flush(0)` starts the sends without waiting, so it returns `nil` only when nothing was pending; a negative timeout means `DefaultFlushTimeout` (10 seconds).
 - **`EnableLogging`**, process-wide. `ShouldLog` still works and is deprecated in favour of it.
 - **`Property.ListChildren`** holds a list property's element schemas. `Property.Children` now holds only an `object` property's children. Adding the field means a positional `Property` literal with three values no longer compiles; use field names.
 - **`Property` decodes as well as encodes.** `UnmarshalJSON` is the inverse of `MarshalJSON`, so the schema JSON reads back into `[]Property`.
