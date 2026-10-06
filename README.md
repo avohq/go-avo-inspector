@@ -104,41 +104,27 @@ waiting to be sent have their own limit (see [High-volume and backfill jobs](#hi
 
 ### High-volume and backfill jobs
 
-At most 4 requests are sent at once. Batches formed while all 4 are busy wait their turn, and up to
-10,000 events can wait. Beyond that the oldest waiting events are dropped and the drop is logged, so
-the number of events held for sending stays bounded when the endpoint is slow or down.
+At most 4 requests are sent at once, and batches formed while all 4 are busy wait their turn. Once
+1,000 events are waiting, each tracking call waits for room before it returns, for at most about the
+10-second request timeout. A job that tracks events faster than the endpoint accepts them, such as
+a backfill loop, is therefore paced by the endpoint, as tracking was in v1, and loses nothing.
+`Destroy` releases calls that are waiting.
 
-A job that tracks events faster than the endpoint accepts them (for example a backfill loop) can
-fill that allowance. Calling `Flush` every few thousand events bounds how many events pile up: it
-sends what is pending and waits for the sends in flight, so the job waits for the endpoint to catch
-up. It does not prevent drops on its own. Between two calls nothing slows the job down, so if it
-tracks more than 10,000 events faster than 4 concurrent sends can take them, the oldest waiting
-events are dropped; keep the interval well below that. And `Flush` waits only up to its timeout:
-when it returns `ErrFlushTimeout`, events are still waiting or in flight, so flush again before
-tracking more. Bound those retries, then give up and log:
+The wait is bounded, so an endpoint that is slow or down can still fall behind: up to 10,000 events
+can wait, and beyond that the oldest waiting events are dropped and the drop is logged, which keeps
+the events held for sending bounded. While the backlog is full, a tracking call can take up to
+about 10 seconds, so keep that in mind when you track from a latency-sensitive path.
+
+A backfill loop needs no special handling; flush once at the end:
 
 ```go
-for i, row := range rows {
+for _, row := range rows {
 	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
-	if i%5000 == 4999 {
-		drained := false
-		for attempt := 0; attempt < 6 && !drained; attempt++ {
-			drained = avoInspector.Flush(avoinspector.DefaultFlushTimeout) == nil
-		}
-		if !drained {
-			log.Print("Avo Inspector did not drain; waiting events may be dropped")
-		}
-	}
 }
-avoInspector.Flush(avoinspector.DefaultFlushTimeout)
+if avoInspector.Flush(avoinspector.DefaultFlushTimeout) != nil {
+	log.Print("Avo Inspector did not drain; some events were still waiting or in flight")
+}
 ```
-
-With a responsive endpoint the first `Flush` normally drains, and an unreachable one fails each
-request at once. Against a slow or hung endpoint each request gives up after 10 seconds, so every
-attempt shrinks the backlog, but draining a few thousand events can then take minutes, longer than
-the attempts allow. Tracking from other goroutines on the same inspector can also keep `Flush` from
-ever seeing it drained. That is why the loop is bounded rather than repeated until `Flush` returns
-`nil`.
 
 ## Enabling logs
 
@@ -318,8 +304,9 @@ These are the behaviour changes you may notice:
 - **Events are buffered outside `Dev`.** In `Staging` and `Prod`, events are sent in batches in the
   background instead of during the call. Call `Flush` before the process exits, or buffered events
   are lost. `Dev` still sends each event before the call returns. At most 4 batches are sent at
-  once, and up to 10,000 events can wait to be sent; beyond that the oldest waiting events are
-  dropped (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
+  once. Once 1,000 events wait to be sent, tracking calls wait for room (at most about 10 seconds),
+  so a tight loop is paced by the endpoint as it was in v1; past 10,000 waiting events the oldest
+  are dropped (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
 - **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process. It gates
   only the debug lines (per-event lines, sampling drops) and the "sent N event(s)." line. Dropped
   events, rejected batches, failed sends and internal errors are always logged, rate-limited (see

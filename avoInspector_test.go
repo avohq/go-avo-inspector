@@ -1128,6 +1128,9 @@ func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
 // Past the 10,000-event waiting allowance the oldest waiting events are dropped: what is sent is
 // the batches already in flight plus the newest 10,000, with one rate-limited drop line.
 func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
+	// Without backpressure, so the backlog can pass its 10,000-event limit.
+	backpressureThreshold = math.MaxInt32
+	t.Cleanup(func() { backpressureThreshold = backpressureEvents })
 	logs := captureLogs(t)
 	advance := fakeLogClock(t)
 	server, release, _ := hungServer(t)
@@ -1516,5 +1519,119 @@ func TestTrack_ReturnedSchemaIsACopy(t *testing.T) {
 	sent, _ := json.Marshal(server.captured()[0].events[0]["eventProperties"])
 	if strings.Contains(string(sent), "MUTATED") {
 		t.Errorf("changing the returned schema changed the queued event: %s", sent)
+	}
+}
+
+// slowServer answers every request after delay.
+func slowServer(t *testing.T, delay time.Duration) *testServer {
+	return newTestServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(delay)
+		_, _ = w.Write([]byte(`{"samplingRate":1}`))
+	})
+}
+
+func deliveredCount(server *testServer) int {
+	total := 0
+	for _, request := range server.captured() {
+		total += len(request.events)
+	}
+	return total
+}
+
+// A tight loop no longer outruns the endpoint: once 1,000 events wait for a sender, tracking calls
+// wait for room, so every event of a 20,000-event loop is delivered.
+func TestBackpressure_TightLoopDeliversEverything(t *testing.T) {
+	logs := captureLogs(t)
+	server := slowServer(t, 20*time.Millisecond)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	for i := 0; i < 20000; i++ {
+		_, _ = inspector.TrackSchemaFromEvent("Loop", nil)
+	}
+	_ = inspector.Flush(30 * time.Second)
+	if n := deliveredCount(server); n != 20000 {
+		t.Errorf("expected 20000 delivered, got %d", n)
+	}
+	if strings.Contains(logs(), "dropped") {
+		t.Errorf("nothing should be dropped:\n%s", logs())
+	}
+}
+
+// Concurrent tracking goroutines are paced the same way, and nothing is lost.
+func TestBackpressure_ConcurrentTrackers(t *testing.T) {
+	logs := captureLogs(t)
+	server := slowServer(t, 20*time.Millisecond)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1500; i++ {
+				_, _ = inspector.TrackSchemaFromEvent("Loop", nil)
+			}
+		}()
+	}
+	wg.Wait()
+	_ = inspector.Flush(30 * time.Second)
+	if n := deliveredCount(server); n != 12000 {
+		t.Errorf("expected 12000 delivered, got %d", n)
+	}
+	if strings.Contains(logs(), "dropped") {
+		t.Errorf("nothing should be dropped:\n%s", logs())
+	}
+}
+
+// trackUntilBlocked tracks until a call takes longer than threshold and returns how long it took,
+// or 0 if no call did within limit calls.
+func trackUntilBlocked(inspector *AvoInspector, threshold time.Duration, limit int) time.Duration {
+	for i := 0; i < limit; i++ {
+		start := time.Now()
+		_, _ = inspector.TrackSchemaFromEvent("Fill", nil)
+		if elapsed := time.Since(start); elapsed > threshold {
+			return elapsed
+		}
+	}
+	return 0
+}
+
+// Against a hung endpoint the wait is bounded: a call waits at most about the bound, then returns.
+func TestBackpressure_WaitIsBounded(t *testing.T) {
+	captureLogs(t)
+	_, release, _ := hungServer(t)
+	defer release()
+	backpressureWait = 200 * time.Millisecond
+	t.Cleanup(func() { backpressureWait = requestTimeout })
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	blocked := trackUntilBlocked(inspector, 50*time.Millisecond, 2000)
+	if blocked < 150*time.Millisecond || blocked > 2*time.Second {
+		t.Errorf("expected a call to wait about 200ms once the backlog filled, got %v", blocked)
+	}
+}
+
+// Destroy releases a call waiting for room.
+func TestBackpressure_DestroyReleasesWaiters(t *testing.T) {
+	captureLogs(t)
+	_, release, _ := hungServer(t)
+	defer release()
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	result := make(chan time.Duration, 1)
+	go func() { result <- trackUntilBlocked(inspector, 50*time.Millisecond, 2000) }()
+	time.Sleep(500 * time.Millisecond)
+	destroyedAt := time.Now()
+	inspector.Destroy()
+	select {
+	case blocked := <-result:
+		if blocked == 0 {
+			t.Fatalf("no call waited for room")
+		}
+		if waited := time.Since(destroyedAt); waited > time.Second {
+			t.Errorf("Destroy released the waiting call only after %v", waited)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Destroy did not release the waiting call")
 	}
 }

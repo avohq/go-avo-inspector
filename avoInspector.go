@@ -42,6 +42,9 @@ const (
 	// MaxQueueSize, which bounds only the unsent buffer; past it the oldest waiting events are
 	// dropped.
 	maxWaitingEvents = 10000
+	// backpressureEvents is the number of events waiting for a sender at which a tracking call
+	// waits for room before returning, so a tight loop is paced by the endpoint, as in v1.
+	backpressureEvents = 1000
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
 	apiKeyControlMessage = "[Avo Inspector] API key contains a control character. The API key is sent as a request header and cannot contain CR, LF, or NUL."
@@ -140,6 +143,9 @@ type AvoInspector struct {
 	nextSendID    uint64
 	waiting       []*queuedBatch
 	waitingEvents int
+	// room is closed and replaced whenever waitingEvents falls or the inspector is destroyed, to
+	// wake tracking calls waiting for room (awaitRoom).
+	room          chan struct{}
 	activeSenders int
 	destroyed     bool
 	// flushTimer is armed while the pending batch holds events and the batch timer is enabled.
@@ -238,6 +244,7 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		disableBatchTimer:      options.DisableBatchTimer,
 		samplingRate:           1.0,
 		inFlight:               map[uint64]chan struct{}{},
+		room:                   make(chan struct{}),
 		ctx:                    ctx,
 		cancel:                 cancel,
 	}
@@ -294,7 +301,9 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 // before the event was queued; delivery failures are never returned. With a batch size of 1
 // (always in Dev) the event is sent before returning, and a non-200 response returns an empty
 // schema. After Destroy it returns an empty schema and sends nothing. An event whose name is empty
-// or whitespace is sent as MissingEventName, and a rate-limited line reports it.
+// or whitespace is sent as MissingEventName, and a rate-limited line reports it. While 1,000 or
+// more events wait to be sent, the call waits for room before returning, for at most about the
+// 10-second request timeout (backpressure); Destroy releases it.
 func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, options TrackOptions) ([]Property, error) {
 	return inspector.track(eventName, eventProperties, options)
 }
@@ -371,6 +380,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		logDropped(dropped, "queue full")
 	}
 	if batch == nil {
+		inspector.awaitRoom()
 		return schema, nil
 	}
 	launched := false
@@ -394,6 +404,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 			return []Property{}, nil
 		}
 	}
+	inspector.awaitRoom()
 	return schema, nil
 }
 
@@ -479,6 +490,7 @@ func (inspector *AvoInspector) dropOldestWaiting() int {
 		}
 		oldest.events = oldest.events[n:]
 		inspector.waitingEvents -= n
+		inspector.signalRoom()
 		dropped += n
 		if len(oldest.events) == 0 {
 			inspector.waiting[0] = nil
@@ -507,6 +519,41 @@ func (inspector *AvoInspector) launch(batch *queuedBatch, startSender bool, drop
 	}
 }
 
+// signalRoom wakes every tracking call waiting in awaitRoom. Call it with mu held whenever
+// waitingEvents falls or the inspector is destroyed.
+func (inspector *AvoInspector) signalRoom() {
+	close(inspector.room)
+	inspector.room = make(chan struct{})
+}
+
+// awaitRoom is the backpressure: while backpressureThreshold or more events wait for a sender, the
+// tracking call waits for room, so a loop that tracks faster than the endpoint accepts is paced by
+// it instead of overflowing the backlog. The wait ends when the backlog falls below the
+// threshold, when the inspector is destroyed, or after backpressureWait at most.
+func (inspector *AvoInspector) awaitRoom() {
+	deadline := time.Now().Add(backpressureWait)
+	for {
+		inspector.mu.Lock()
+		if inspector.destroyed || inspector.waitingEvents < backpressureThreshold {
+			inspector.mu.Unlock()
+			return
+		}
+		room := inspector.room
+		inspector.mu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-room:
+			timer.Stop()
+		case <-timer.C:
+			return
+		}
+	}
+}
+
 // abandonReserved finishes a batch whose reserved sender was never started: it is removed from
 // inFlight, its channels are closed and it counts as dropped. The slot passes to the next waiting
 // batch, if any, so waiting batches are not stranded either; otherwise it is freed.
@@ -519,6 +566,7 @@ func (inspector *AvoInspector) abandonReserved(batch *queuedBatch) {
 		inspector.waiting[0] = nil
 		inspector.waiting = inspector.waiting[1:]
 		inspector.waitingEvents -= len(next.events)
+		inspector.signalRoom()
 	} else {
 		inspector.activeSenders--
 	}
@@ -546,6 +594,7 @@ func (inspector *AvoInspector) runSender(batch *queuedBatch) {
 		inspector.waiting[0] = nil
 		inspector.waiting = inspector.waiting[1:]
 		inspector.waitingEvents -= len(batch.events)
+		inspector.signalRoom()
 		inspector.mu.Unlock()
 	}
 }
@@ -676,6 +725,7 @@ func (inspector *AvoInspector) Destroy() {
 	}
 	inspector.waiting = nil
 	inspector.waitingEvents = 0
+	inspector.signalRoom()
 	inspector.inFlight = map[uint64]chan struct{}{}
 	inspector.mu.Unlock()
 
@@ -730,6 +780,13 @@ func (inspector *AvoInspector) setSamplingRate(rate float64) {
 	inspector.samplingRate = rate
 	inspector.mu.Unlock()
 }
+
+// backpressureThreshold and backpressureWait are backpressureEvents and the request timeout; they
+// are variables only so tests can change them.
+var (
+	backpressureThreshold = backpressureEvents
+	backpressureWait      = requestTimeout
+)
 
 // testHookInSend, when set by a test, runs inside a sender just before a batch is posted. It is
 // always nil outside tests.
