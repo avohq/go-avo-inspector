@@ -584,8 +584,12 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 		logRejected(res.statusCode)
 	case sendFailed:
 		// A send abandoned by Destroy is not a failure.
-		if !errors.Is(res.err, errRequestAborted) {
-			logFailedSend(res.err)
+		failure, ok := res.err.(*sendFailure)
+		if !ok {
+			failure = errRequestFailed
+		}
+		if failure != errRequestAborted {
+			logFailedSend(failure)
 		}
 	}
 	batch.result <- res
@@ -817,12 +821,11 @@ func logRejected(status int) {
 	})
 }
 
-// logFailedSend reports a batch lost to a network error, a timeout or a refused send. The errors
-// that reach it are the package's own fixed labels.
-func logFailedSend(err error) {
-	label := err.Error()
-	logLimited("failed:"+label, 1, func(_, suppressed int, seconds int64) string {
-		return "schema sending failed: " + label + "." + suppressedSuffix(suppressed, seconds)
+// logFailedSend reports a batch lost to a network error, a timeout or a refused send. Its text and
+// its limiter key come from the failure's fixed label, never from an error message.
+func logFailedSend(failure *sendFailure) {
+	logLimited("failed:"+failure.label, 1, func(_, suppressed int, seconds int64) string {
+		return "schema sending failed: " + failure.label + "." + suppressedSuffix(suppressed, seconds)
 	})
 }
 

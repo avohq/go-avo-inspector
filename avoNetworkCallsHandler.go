@@ -106,13 +106,22 @@ type sendResult struct {
 	err          error
 }
 
+// sendFailure is why a send failed. Its label is fixed text, used both in the log line and as the
+// log rate limiter's key, so neither can ever carry text from outside the package.
+type sendFailure struct {
+	label string
+}
+
+func (f *sendFailure) Error() string { return f.label }
+
+// The send failures. They are compared by identity.
 var (
-	errUnsafeHeader   = errors.New("apiKey contains a control character and cannot be sent as a header")
-	errRequestTimeout = errors.New("Request timed out")
-	errRequestFailed  = errors.New("Request failed")
-	errRequestAborted = errors.New("Request abandoned (destroyed)")
+	errUnsafeHeader   = &sendFailure{"apiKey contains a control character and cannot be sent as a header"}
+	errRequestTimeout = &sendFailure{"Request timed out"}
+	errRequestFailed  = &sendFailure{"Request failed"}
+	errRequestAborted = &sendFailure{"Request abandoned (destroyed)"}
 	// errSerialization replaces the encoder's own message, which quotes the value it rejected.
-	errSerialization = errors.New("Request serialization failed")
+	errSerialization = &sendFailure{"Request serialization failed"}
 )
 
 // AvoNetworkCallsHandler sends batches of events to the Inspector API (SPEC.md §7).
