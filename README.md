@@ -270,7 +270,11 @@ or timer, so one you stop using after a `Flush` is garbage-collected even withou
   `github.com/avohq/go-avo-inspector/v2`. Run `go get github.com/avohq/go-avo-inspector/v2` and
   change your imports to that path. The package name is still `avoinspector`.
 
-Apart from the import path, every v1.0.0 function and type still exists with the same signature.
+Apart from the import path, every v1.0.0 function and method keeps its signature, and every v1.0.0
+type still exists. One type gained a field: `Property` adds `ListChildren`, so a positional
+`Property` literal with three values no longer compiles. Use field names in the literal, or add the
+fourth value.
+
 These are the behaviour changes you may notice:
 
 - **List children moved.** A list property's element schemas are now in `Property.ListChildren`, in
