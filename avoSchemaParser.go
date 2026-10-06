@@ -549,3 +549,38 @@ func indirect(rv reflect.Value) reflect.Value {
 	}
 	return rv
 }
+
+// copySchema returns a deep copy of schema, so the copy shares no slice with it at any depth.
+func copySchema(schema []Property) []Property {
+	if schema == nil {
+		return nil
+	}
+	copied := make([]Property, len(schema))
+	for i, property := range schema {
+		copied[i] = Property{
+			PropertyName: property.PropertyName,
+			PropertyType: property.PropertyType,
+			Children:     copySchema(property.Children),
+			ListChildren: copyListChildren(property.ListChildren),
+		}
+	}
+	return copied
+}
+
+func copyListChildren(children []interface{}) []interface{} {
+	if children == nil {
+		return nil
+	}
+	copied := make([]interface{}, len(children))
+	for i, child := range children {
+		switch c := child.(type) {
+		case []Property:
+			copied[i] = copySchema(c)
+		case []interface{}:
+			copied[i] = copyListChildren(c)
+		default:
+			copied[i] = c
+		}
+	}
+	return copied
+}

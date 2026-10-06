@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1492,5 +1493,28 @@ func TestFlush_NilMeansDrained(t *testing.T) {
 	inspector.Destroy()
 	if err := inspector.Flush(0); err != nil {
 		t.Errorf("Flush on a destroyed instance: expected nil, got %v", err)
+	}
+}
+
+// The schema a tracking call returns shares nothing with the queued event: changing it, at any
+// depth, does not change what is sent.
+func TestTrack_ReturnedSchemaIsACopy(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	schema, _ := inspector.TrackSchemaFromEvent("Mutate", map[string]interface{}{
+		"a":    1,
+		"list": []interface{}{"x", map[string]interface{}{"k": 1}, []interface{}{2}},
+		"obj":  map[string]interface{}{"inner": map[string]interface{}{"n": 1}},
+	})
+	schema[0].PropertyType = "MUTATED"
+	schema[1].ListChildren[0] = "MUTATED"
+	schema[1].ListChildren[1].([]Property)[0].PropertyType = "MUTATED"
+	schema[1].ListChildren[2].([]interface{})[0] = "MUTATED"
+	schema[2].Children[0].Children[0].PropertyType = "MUTATED"
+	schema[2].Children = append(schema[2].Children[:0], Property{PropertyName: "MUTATED"})
+	_ = inspector.Flush(2 * time.Second)
+	sent, _ := json.Marshal(server.captured()[0].events[0]["eventProperties"])
+	if strings.Contains(string(sent), "MUTATED") {
+		t.Errorf("changing the returned schema changed the queued event: %s", sent)
 	}
 }

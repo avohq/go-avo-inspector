@@ -423,7 +423,8 @@ func (inspector *AvoInspector) newWireEvent(eventName, streamId string, sampling
 		EventName:       eventName,
 		OutputReference: outputReference,
 		OriginHint:      originHint,
-		EventProperties: schema,
+		// A copy: the caller gets schema back and may change it before the event is sent.
+		EventProperties: copySchema(schema),
 	}
 }
 
