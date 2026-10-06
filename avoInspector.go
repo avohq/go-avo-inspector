@@ -154,6 +154,9 @@ func init() {
 	testhooks.SetSamplingRate = func(inspector interface{}, rate float64) {
 		inspector.(*AvoInspector).setSamplingRate(rate)
 	}
+	testhooks.SetProductionEndpoint = func(url string) {
+		trackingEndpoint = url
+	}
 }
 
 // NewAvoInspector creates an inspector with the default batch configuration.

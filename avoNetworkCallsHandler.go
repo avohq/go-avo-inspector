@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
 // BaseBody is the pre-3.0 wire body.
@@ -79,7 +81,8 @@ type wireEvent struct {
 const productionEndpoint = "https://api.avo.app/inspector/v2/track"
 
 // trackingEndpoint is the URL used when the mock endpoint does not apply. It is a variable only so
-// the package's tests can point it away from the real API; nothing outside the package can.
+// tests can point it away from the real API: this package's tests set it directly, and the other
+// test binaries of this module through internal/testhooks. Nothing outside the module can.
 var trackingEndpoint = productionEndpoint
 
 const (
@@ -190,7 +193,11 @@ func (h *AvoNetworkCallsHandler) send(ctx context.Context, events []wireEvent) s
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.endpoint(), bytes.NewReader(payload))
+	url := h.endpoint()
+	if observe := testhooks.ObserveRequest; observe != nil {
+		observe(url)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return sendResult{status: sendFailed, err: errRequestFailed}
 	}
