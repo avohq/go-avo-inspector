@@ -117,16 +117,29 @@ can wait, and beyond that the oldest waiting events are dropped and the drop is 
 the events held for sending bounded. While the backlog is full, a tracking call can take up to
 about 10 seconds, so keep that in mind when you track from a latency-sensitive path.
 
-A backfill loop needs no special handling; flush once at the end:
+A backfill loop needs no periodic flushes; flush at the end. `Flush` waits only up to its timeout,
+so when it returns `ErrFlushTimeout`, events are still waiting or in flight: flush again, bound
+those retries, then give up and log:
 
 ```go
 for _, row := range rows {
 	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
 }
-if avoInspector.Flush(avoinspector.DefaultFlushTimeout) != nil {
-	log.Print("Avo Inspector did not drain; some events were still waiting or in flight")
+drained := false
+for attempt := 0; attempt < 6 && !drained; attempt++ {
+	drained = avoInspector.Flush(avoinspector.DefaultFlushTimeout) == nil
+}
+if !drained {
+	log.Print("Avo Inspector did not drain; waiting events may be dropped")
 }
 ```
+
+With a responsive endpoint the first `Flush` normally drains, and an unreachable one fails each
+request at once. Against a slow or hung endpoint each request gives up after 10 seconds, so every
+attempt shrinks the backlog, but draining a few thousand events can then take minutes, longer than
+the attempts allow. Tracking from other goroutines on the same inspector can also keep `Flush` from
+ever seeing it drained. That is why the loop is bounded rather than repeated until `Flush` returns
+`nil`.
 
 ## Enabling logs
 
