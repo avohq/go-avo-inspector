@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 type om = OrderedMap
@@ -577,4 +578,51 @@ func bytesPerRun(runs int, f func()) uint64 {
 	}
 	runtime.ReadMemStats(&after)
 	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
+
+// A typed slice or array whose element kind always classifies as "unknown" has one "unknown"
+// child, whatever its values. Element types whose classification depends on the value (maps,
+// pointers, interfaces) keep typing each element.
+func TestExtractSchema_TypedUnknownSlices(t *testing.T) {
+	x := 1
+	assertSchemaJSON(t, extractSchema(om{
+		{"structs", []struct{ A int }{{1}, {2}}},
+		{"complex", [2]complex64{}},
+		{"funcs", []func(){nil, func() {}}},
+		{"chans", []chan int{nil, make(chan int)}},
+		{"unsafe", []unsafe.Pointer{nil}},
+		{"kvarray", [2]KeyValue{}},
+		{"times", []time.Time{{}}},
+		{"intmaps", []map[int]int{nil, {1: 1}}},
+		{"ptrs", []*int{nil, &x}},
+		{"ifaces", []interface{ String() string }{nil, time.Second}},
+	}), `[{"propertyName":"structs","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"complex","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"funcs","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"chans","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"unsafe","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"kvarray","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"times","propertyType":"list(object)","children":["unknown"]},`+
+		`{"propertyName":"intmaps","propertyType":"list(string)","children":["null","unknown"]},`+
+		`{"propertyName":"ptrs","propertyType":"list(string)","children":["null","int"]},`+
+		`{"propertyName":"ifaces","propertyType":"list(string)","children":["null","int"]}]`)
+}
+
+// A large list of structs must not be copied element by element: every element is "unknown".
+func TestExtractSchema_LargeStructListsAllocateLittle(t *testing.T) {
+	structs := make([]struct{ A [200]byte }, 1<<16)
+	input := om{{"v", structs}}
+	if allocated := bytesPerRun(5, func() { extractSchema(input) }); allocated > 1<<20 {
+		t.Errorf("[]struct of %d elements: allocated %d bytes per run, want at most 1 MiB", len(structs), allocated)
+	}
+}
+
+// A list mapped without visiting its elements still counts as one expansion.
+func TestExtractSchema_UniformListsCountOneExpansion(t *testing.T) {
+	parser := &schemaParser{}
+	value := om{{"s", []struct{}{{}}}, {"f", []float64{1}}}
+	parser.enterObject(value, identity(value), 0)
+	if parser.expansions != 3 {
+		t.Errorf("expansions = %d, want 3 (the root and two lists)", parser.expansions)
+	}
 }

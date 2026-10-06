@@ -358,29 +358,38 @@ func (p *schemaParser) enterObject(value interface{}, id nodeIdentity, depth int
 }
 
 // enterList maps a list value with its identity on the ancestor path. A non-empty typed slice or
-// array of scalars maps to its one element type without visiting its elements, so its size costs
-// nothing; it still counts as one expansion.
+// array whose element type alone decides its elements' kind maps to that one type without visiting
+// its elements, so its size costs nothing; it still counts as one expansion.
 func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) []interface{} {
 	pushed := p.push(id)
 	defer p.pop(pushed)
-	if kind := scalarElementKind(value); kind != kindUnknown {
+	if kind, ok := uniformElementKind(value); ok {
 		return []interface{}{basicTypeName(kind)}
 	}
 	return p.mapList(listElements(value), depth)
 }
 
-// scalarElementKind returns the kind every element of a non-empty typed slice or array has when
-// its element type is a scalar, and kindUnknown otherwise. A json.Number element is typed by its
-// value, so a []json.Number is not one kind.
-func scalarElementKind(value interface{}) valueKind {
+// uniformElementKind returns the kind every element of a non-empty typed slice or array has when
+// its element type alone decides it: a scalar, or a kind classify always reports as unknown
+// (struct, complex, func, chan, unsafe pointer). Element types whose kind depends on the value
+// (interfaces, pointers, maps, slices, arrays, and json.Number, typed by its text) report false.
+func uniformElementKind(value interface{}) (valueKind, bool) {
 	if _, ok := value.([]interface{}); ok {
-		return kindUnknown
+		return kindUnknown, false
 	}
 	rv := indirect(reflect.ValueOf(value))
-	if rv.Len() == 0 || rv.Type().Elem() == jsonNumberType {
-		return kindUnknown
+	elem := rv.Type().Elem()
+	if rv.Len() == 0 || elem == jsonNumberType {
+		return kindUnknown, false
 	}
-	return scalarKind(rv.Type().Elem().Kind())
+	if kind := scalarKind(elem.Kind()); kind != kindUnknown {
+		return kind, true
+	}
+	switch elem.Kind() {
+	case reflect.Struct, reflect.Complex64, reflect.Complex128, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return kindUnknown, true
+	}
+	return kindUnknown, false
 }
 
 // push counts an expansion and puts id on the ancestor path.
