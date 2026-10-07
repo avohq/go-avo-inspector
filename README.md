@@ -129,7 +129,9 @@ those retries, then give up and log:
 
 ```go
 for _, row := range rows {
-	avoInspector.TrackSchemaFromEvent(row.Event, row.Properties)
+	if _, err := avoInspector.TrackSchemaFromEvent(row.Event, row.Properties); err != nil {
+		log.Print("Avo Inspector track: ", err)
+	}
 }
 drained := false
 for attempt := 0; attempt < 6 && !drained; attempt++ {
