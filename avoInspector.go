@@ -67,8 +67,9 @@ const DefaultFlushTimeout = 10 * time.Second
 
 // ErrFlushTimeout is returned by Flush when it did not drain the inspector: something was still
 // buffered, waiting or in flight as it returned, because the timeout passed or, for Flush(0),
-// because it does not wait. It is informational: the pending events were still sent, the instance
-// stays usable, and callers may ignore it.
+// because it does not wait. The pending events are still queued for sending and the instance stays
+// usable, but some may not have been sent yet: before the process exits, flush again or accept that
+// they may be lost. Otherwise callers may ignore it.
 var ErrFlushTimeout = errors.New("Avo Inspector: flush returned before all events were sent")
 
 // shouldLog is the process-wide logging flag (SPEC.md §4.4).
@@ -655,8 +656,9 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 // DefaultFlushTimeout (10 seconds). Flush always completes (SPEC.md §4.6), and its error reports
 // whether it drained the inspector: nil when, as Flush returns, nothing is buffered, waiting or in
 // flight, and ErrFlushTimeout otherwise, such as when Flush(0) leaves its sends in flight or the
-// timeout passes first. Either way the pending events were sent and the inspector stays usable;
-// callers may ignore the error. Delivery failures are not reported. On a destroyed inspector Flush
+// timeout passes first. Either way the pending events are queued for sending and the inspector
+// stays usable; ErrFlushTimeout means some may not have been sent yet, and callers may otherwise
+// ignore it. Delivery failures are not reported. On a destroyed inspector Flush
 // returns nil. Call Flush before the process or serverless handler exits: pending events are
 // otherwise lost.
 func (inspector *AvoInspector) Flush(timeout time.Duration) error {

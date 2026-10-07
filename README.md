@@ -109,8 +109,8 @@ waiting to be sent have their own limit (see [High-volume and backfill jobs](#hi
 At most 4 requests are sent at once, and batches formed while all 4 are busy wait their turn. Once
 1,000 events are waiting, each tracking call waits for room before it returns, for at most about the
 10-second request timeout. A job that tracks events faster than the endpoint accepts them, such as
-a backfill loop, is therefore paced by the endpoint, as tracking was in v1, and loses nothing.
-`Destroy` releases calls that are waiting.
+a backfill loop, is therefore paced by the endpoint, as tracking was in v1, which slows the growth of
+the backlog. Pacing does not guarantee delivery. `Destroy` releases calls that are waiting.
 
 The wait is bounded, so an endpoint that is slow or down can still fall behind: up to 10,000 events
 can wait, and beyond that the oldest waiting events are dropped and the drop is logged, which keeps
@@ -286,9 +286,11 @@ avoInspector.ExtractSchema(map[string]interface{}{"order": order})
 `Flush` sends the pending events and waits up to the given timeout for in-flight sends. Call it
 before the process exits (see [Shutdown](#shutdown)). It always completes, and its error says
 whether it drained the inspector: `nil` when, as `Flush` returns, nothing is buffered, waiting or in
-flight, and `ErrFlushTimeout` otherwise, such as when the timeout passed first. In both cases the
-pending events were sent and the inspector stays usable, and you may ignore the error. Delivery
-failures are never reported. `Flush(0)` starts sending the pending events without waiting for them,
+flight, and `ErrFlushTimeout` otherwise, such as when the timeout passed first. Either way the
+pending events are queued for sending and the inspector stays usable. `ErrFlushTimeout` does not
+mean they were sent: some may still be waiting or in flight, so before the process exits, flush
+again or accept that they may be lost. Otherwise you may ignore the error. Delivery failures are
+never reported. `Flush(0)` starts sending the pending events without waiting for them,
 so it returns `nil` only when there was nothing to send and nothing in flight; a negative timeout
 waits up to `DefaultFlushTimeout`. `Flush` on a destroyed inspector returns `nil`.
 
