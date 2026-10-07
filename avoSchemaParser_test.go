@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -435,9 +438,12 @@ func TestExtractSchema_SharedReferencesAreBounded(t *testing.T) {
 					t.Errorf("took %v", elapsed)
 				}
 				t.Logf("fan-out %d: %v", fanOut, elapsed)
+				// Whichever budget runs out first bounds it: here the 10,000 properties, before
+				// 10,000 expanded values.
 				expanded, _ := countExpanded(schema)
-				if expanded != maxSchemaExpansions {
-					t.Errorf("expected exactly %d expanded values, got %d", maxSchemaExpansions, expanded)
+				if properties := countProperties(schema); properties != maxSchemaProperties || expanded > maxSchemaExpansions {
+					t.Errorf("expected %d properties and at most %d expanded values, got %d and %d",
+						maxSchemaProperties, maxSchemaExpansions, properties, expanded)
 				}
 				// Bounded by the budget: at most fanOut entries per expanded value.
 				if encoded, _ := json.Marshal(schema); len(encoded) > maxSchemaExpansions*(fanOut+1)*80 {
@@ -495,8 +501,6 @@ func TestExtractSchema_BudgetMatchesNode(t *testing.T) {
 		input  OrderedMap
 		sha256 string
 	}{
-		{"fan-out 3", sharedDAG(3, 12), "0b64c37a4ceae43ca1b7cc4880db67ca94f134de0b4b76becbddd9c504f6860c"},
-		{"fan-out 4", sharedDAG(4, 12), "1bd7f603f6472235da57a3c711740890b9368566a95b7cfd25ac1d21ec8d1c09"},
 		{"10,000 objects", om{{"items", objects}}, "128e49642937e1ca0cc40e5f3c09268a5cde25f3d8f449735176e16f900e2597"},
 	} {
 		encoded, err := json.Marshal(extractSchema(tc.input))
@@ -624,5 +628,197 @@ func TestExtractSchema_UniformListsCountOneExpansion(t *testing.T) {
 	parser.enterObject(value, identity(value), 0)
 	if parser.expansions != 3 {
 		t.Errorf("expansions = %d, want 3 (the root and two lists)", parser.expansions)
+	}
+}
+
+// countProperties counts the property entries in a schema at every depth, including those inside
+// list children.
+func countProperties(schema []Property) int {
+	count := 0
+	for _, property := range schema {
+		count += 1 + countProperties(property.Children) + countListProperties(property.ListChildren)
+	}
+	return count
+}
+
+func countListProperties(items []interface{}) int {
+	count := 0
+	for _, item := range items {
+		switch v := item.(type) {
+		case []Property:
+			count += countProperties(v)
+		case []interface{}:
+			count += countListProperties(v)
+		}
+	}
+	return count
+}
+
+// One extraction emits at most 10,000 properties. A 1,000,000-key map yields its first 10,000 keys in
+// sorted order, an OrderedMap its first 10,000 in the given order, quickly and with a small body.
+func TestExtractSchema_PropertyBudgetOnHugeObjects(t *testing.T) {
+	const n = 1000000
+	plain := make(map[string]interface{}, n)
+	ordered := make(OrderedMap, 0, n)
+	keys := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("k%d", n-i) // inserted in reverse, so sorted and given order differ
+		plain[key] = i
+		ordered = append(ordered, KeyValue{key, i})
+		keys = append(keys, key)
+	}
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	for _, tc := range []struct {
+		name  string
+		input interface{}
+		want  []string
+	}{
+		{"map, sorted order", plain, sorted[:maxSchemaProperties]},
+		{"OrderedMap, given order", ordered, keys[:maxSchemaProperties]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			schema := extractSchema(tc.input)
+			elapsed := time.Since(start)
+			if len(schema) != maxSchemaProperties || countProperties(schema) != maxSchemaProperties {
+				t.Fatalf("expected %d properties, got %d", maxSchemaProperties, len(schema))
+			}
+			for i, property := range schema {
+				if property.PropertyName != tc.want[i] {
+					t.Fatalf("property %d is %q, want %q", i, property.PropertyName, tc.want[i])
+				}
+			}
+			encoded, _ := json.Marshal(schema)
+			if elapsed > 2*time.Second || len(encoded) > 1<<20 {
+				t.Errorf("took %v and %d bytes", elapsed, len(encoded))
+			}
+			t.Logf("%s: %v, %d bytes", tc.name, elapsed, len(encoded))
+		})
+	}
+}
+
+// Nested properties use the same budget, counted depth-first: an object's children are counted
+// before its next sibling, and once the budget is spent the rest is omitted.
+func TestExtractSchema_PropertyBudgetCountsNestedProperties(t *testing.T) {
+	inner := make(OrderedMap, 0, 9999)
+	for i := 0; i < 9999; i++ {
+		inner = append(inner, KeyValue{fmt.Sprintf("c%d", i), i})
+	}
+	listed := om{{"x", 1}, {"y", 2}}
+	schema := extractSchema(om{{"a", inner}, {"b", 1}, {"c", list{listed}}})
+	if len(schema) != 1 || schema[0].PropertyName != "a" || len(schema[0].Children) != 9999 {
+		t.Fatalf("expected only a with its 9,999 children (10,000 in all), got %d top-level", len(schema))
+	}
+
+	// Objects inside lists count too: 9,998 + c + the two properties of its list element = 10,001.
+	almost := make(OrderedMap, 0, 9998)
+	for i := 0; i < 9998; i++ {
+		almost = append(almost, KeyValue{fmt.Sprintf("p%d", i), i})
+	}
+	almost = append(almost, KeyValue{"c", list{listed}})
+	schema = extractSchema(almost)
+	if got := countProperties(schema); got != maxSchemaProperties {
+		t.Errorf("expected %d properties counting list elements, got %d", maxSchemaProperties, got)
+	}
+	element := schema[len(schema)-1].ListChildren[0].([]Property)
+	if len(element) != 1 || element[0].PropertyName != "x" {
+		t.Errorf("expected the list element cut after x, got %v", element)
+	}
+}
+
+// Below the budget nothing changes.
+func TestExtractSchema_PropertyBudgetLeavesSmallEventsAlone(t *testing.T) {
+	input := make(map[string]interface{}, 9999)
+	for i := 0; i < 9999; i++ {
+		input[fmt.Sprintf("k%05d", i)] = i
+	}
+	schema := extractSchema(input)
+	if len(schema) != 9999 || schema[0].PropertyName != "k00000" || schema[9998].PropertyName != "k09998" {
+		t.Errorf("expected all 9,999 properties in sorted order, got %d", len(schema))
+	}
+}
+
+// canonical writes a schema's wire JSON in the cross-SDK canonical form: {name|type[|children]} for
+// an entry, [a,b] for an array, a JSON string for a type string.
+func canonical(value interface{}, out *strings.Builder) {
+	switch v := value.(type) {
+	case []interface{}:
+		out.WriteByte('[')
+		for i, item := range v {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			canonical(item, out)
+		}
+		out.WriteByte(']')
+	case map[string]interface{}:
+		out.WriteString("{" + v["propertyName"].(string) + "|" + v["propertyType"].(string))
+		if children, ok := v["children"]; ok {
+			out.WriteByte('|')
+			canonical(children, out)
+		}
+		out.WriteByte('}')
+	case string:
+		quoted, _ := json.Marshal(v)
+		out.Write(quoted)
+	}
+}
+
+// flatOrdered is key0..key(n-1) = int, in insertion order.
+func flatOrdered(n int) OrderedMap {
+	m := make(OrderedMap, 0, n)
+	for i := 0; i < n; i++ {
+		m = append(m, KeyValue{"key" + strconv.Itoa(i), i})
+	}
+	return m
+}
+
+// mapsDag is depth levels whose fan keys k0..k(fan-1) all refer to the same next level, ending in
+// {"v": 1}: the Java SDK's test input.
+func mapsDag(fan, depth int) OrderedMap {
+	child := om{{"v", 1}}
+	for d := 0; d < depth; d++ {
+		level := make(OrderedMap, 0, fan)
+		for k := 0; k < fan; k++ {
+			level = append(level, KeyValue{"k" + strconv.Itoa(k), child})
+		}
+		child = level
+	}
+	return child
+}
+
+// The property budget gives the same output as the Java SDK (and Node): the digests and lengths
+// are of the canonical form of the reference SDKs' output for the same inputs.
+func TestExtractSchema_PropertyBudgetMatchesReferenceSDKs(t *testing.T) {
+	nested := make(OrderedMap, 0, 5)
+	for _, key := range []string{"a", "b", "c", "d", "e"} {
+		nested = append(nested, KeyValue{key, flatOrdered(5000)})
+	}
+	items := om{{"items", list{flatOrdered(4000), flatOrdered(4000), flatOrdered(4000)}}, {"after", 1}}
+	for _, tc := range []struct {
+		name   string
+		input  OrderedMap
+		length int
+		sha256 string
+	}{
+		{"flat 1M keys", flatOrdered(1000000), 138891, "9652d270cd6568d00b73032b56b73782771f634703c89f7fa81df852ae50c835"},
+		{"nested a..e of 5,000", nested, 137779, "73549e68066367f3e976a97b299df3bb972e80fe65b487f89b7d7f251397984d"},
+		{"items of 3 maps of 4,000, then after", items, 136686, "1f5e38d0b71cdb231568521f0f1ceffc768cd7fcae5e08ab555fc64b8227601f"},
+		{"mapsDag(4,12)", mapsDag(4, 12), 147496, "5012bc5b9543195e969f2b10956402ef0306e92a009f409194dffd8bd46083ed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, _ := json.Marshal(extractSchema(tc.input))
+			var wire interface{}
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			var out strings.Builder
+			canonical(wire, &out)
+			digest := sha256.Sum256([]byte(out.String()))
+			if got := hex.EncodeToString(digest[:]); got != tc.sha256 || out.Len() != tc.length {
+				t.Errorf("differs from the reference SDKs: sha256 %s, length %d, %d entries", got, out.Len(), strings.Count(out.String(), "{"))
+			}
+		})
 	}
 }

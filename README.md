@@ -257,8 +257,17 @@ a value:
   every list count).
 
 A property cut off this way is reported as `"object"` with empty `children`; a list element cut off
-this way is reported as the type string `"object"`. Strings, numbers and booleans never count toward
-the limits, whatever their size.
+this way is reported as the type string `"object"`.
+
+Separately, one call emits at most 10,000 properties, counting the properties of nested objects too
+(an object's properties are counted before its next sibling). Once 10,000 have been emitted, the
+remaining properties are left out of the schema: for a map, the keys after the first 10,000 in sorted
+order; for an `OrderedMap`, those after the first 10,000 in its order. A map with a million keys
+therefore costs about as much as one with 10,000.
+
+Neither limit is logged when it applies. Elements of a list that are strings, numbers or booleans
+never count toward either limit, and a `[]byte` or other slice of a scalar type is typed from its
+element type without visiting its elements, whatever its size.
 
 For example, a map that refers to itself:
 
@@ -310,7 +319,8 @@ These are the behaviour changes you may notice:
   instead of `"unknown"`.
 - **Schema extraction is bounded.** v1 descended without limit, so a map that contained itself
   recursed until the stack overflowed. Values deeper than 10 levels, cycles, and values past 10,000
-  expanded objects and lists per call are now reported as `"object"` (see
+  expanded objects and lists per call are now reported as `"object"`, and a call emits at most
+  10,000 properties; the rest are left out (see
   [Schema extraction limits](#schema-extraction-limits)).
 - **Property order is sorted.** A `map[string]interface{}` is listed sorted by key; in v1.0.0 the
   order was random. Use `OrderedMap` to choose the order.

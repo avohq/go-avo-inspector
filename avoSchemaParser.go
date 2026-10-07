@@ -2,6 +2,7 @@ package avoinspector
 
 import (
 	"bytes"
+	"container/heap"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -17,6 +18,11 @@ const maxSchemaDepth = 10
 // that are not cycles can otherwise expand exponentially; past the budget, complex values are
 // reported as "object" like the depth cap.
 const maxSchemaExpansions = 10000
+
+// maxSchemaProperties bounds the property entries emitted in one extraction, at every depth. Past it,
+// further properties are omitted, in the order they are visited: sorted keys for a map, the given
+// order for an OrderedMap. It is independent of maxSchemaExpansions.
+const maxSchemaProperties = 10000
 
 // Property represents a schema of a single event property (SPEC.md §7.3.4).
 //
@@ -169,6 +175,8 @@ type schemaParser struct {
 	ancestors []nodeIdentity
 	// expansions counts the objects and lists mapped so far, the root included.
 	expansions int
+	// properties counts the property entries emitted so far, at every depth.
+	properties int
 }
 
 // nodeIdentity identifies a map or slice value. A slice is identified by its backing array, its
@@ -352,7 +360,8 @@ func (p *schemaParser) visit(value interface{}, kind valueKind, depth int) (leaf
 // enterObject maps an object value with its identity on the ancestor path.
 func (p *schemaParser) enterObject(value interface{}, id nodeIdentity, depth int) []Property {
 	pushed := p.push(id)
-	result := p.mapObject(objectEntries(value), depth)
+	// At most the remaining property budget can be emitted, so take only that many entries.
+	result := p.mapObject(objectEntries(value, maxSchemaProperties-p.properties), depth)
 	p.pop(pushed)
 	return result
 }
@@ -411,6 +420,10 @@ func (p *schemaParser) pop(pushed bool) {
 func (p *schemaParser) mapObject(entries []KeyValue, depth int) []Property {
 	result := make([]Property, 0, len(entries))
 	for _, entry := range entries {
+		if p.properties >= maxSchemaProperties {
+			break
+		}
+		p.properties++
 		kind := classify(entry.Value)
 		property := Property{PropertyName: entry.Key, PropertyType: propValueType(entry.Value, kind)}
 		leaf, id := p.visit(entry.Value, kind, depth)
@@ -483,18 +496,25 @@ func identity(value interface{}) nodeIdentity {
 	}
 }
 
-// objectEntries returns the entries of a value classified as an object: an OrderedMap keeps its
-// order, any other string-keyed map is sorted by key.
-func objectEntries(value interface{}) []KeyValue {
+// objectEntries returns at most limit entries of a value classified as an object: the first ones in
+// the given order for an OrderedMap, the first ones in sorted key order for any other string-keyed
+// map. Only those limit keys are sorted, so a huge map costs O(keys * log limit).
+func objectEntries(value interface{}, limit int) []KeyValue {
+	if limit <= 0 {
+		return nil
+	}
 	switch v := value.(type) {
 	case OrderedMap:
+		if len(v) > limit {
+			return v[:limit]
+		}
 		return v
 	case map[string]interface{}:
 		keys := make([]string, 0, len(v))
 		for key := range v {
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+		keys = firstSortedKeys(keys, limit)
 		entries := make([]KeyValue, len(keys))
 		for i, key := range keys {
 			entries[i] = KeyValue{Key: key, Value: v[key]}
@@ -503,15 +523,65 @@ func objectEntries(value interface{}) []KeyValue {
 	}
 	rv := indirect(reflect.ValueOf(value))
 	if rv.Kind() == reflect.Slice {
-		return rv.Convert(orderedMapType).Interface().(OrderedMap)
+		ordered := rv.Convert(orderedMapType).Interface().(OrderedMap)
+		if len(ordered) > limit {
+			return ordered[:limit]
+		}
+		return ordered
 	}
-	keys := rv.MapKeys()
-	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+	mapKeys := rv.MapKeys()
+	if len(mapKeys) <= limit {
+		sort.Slice(mapKeys, func(i, j int) bool { return mapKeys[i].String() < mapKeys[j].String() })
+		entries := make([]KeyValue, len(mapKeys))
+		for i, key := range mapKeys {
+			entries[i] = KeyValue{Key: key.String(), Value: rv.MapIndex(key).Interface()}
+		}
+		return entries
+	}
+	keys := make([]string, len(mapKeys))
+	for i, key := range mapKeys {
+		keys[i] = key.String()
+	}
+	keys = firstSortedKeys(keys, limit)
+	keyType := rv.Type().Key()
 	entries := make([]KeyValue, len(keys))
 	for i, key := range keys {
-		entries[i] = KeyValue{Key: key.String(), Value: rv.MapIndex(key).Interface()}
+		entries[i] = KeyValue{Key: key, Value: rv.MapIndex(reflect.ValueOf(key).Convert(keyType)).Interface()}
 	}
 	return entries
+}
+
+// firstSortedKeys returns the n smallest keys in sorted order. When there are more than n keys it
+// keeps the n smallest in a max-heap instead of sorting them all.
+func firstSortedKeys(keys []string, n int) []string {
+	if len(keys) <= n {
+		sort.Strings(keys)
+		return keys
+	}
+	smallest := keyMaxHeap(append(make([]string, 0, n), keys[:n]...))
+	heap.Init(&smallest)
+	for _, key := range keys[n:] {
+		if key < smallest[0] {
+			smallest[0] = key
+			heap.Fix(&smallest, 0)
+		}
+	}
+	sort.Strings(smallest)
+	return smallest
+}
+
+// keyMaxHeap is a container/heap of strings with the largest at the root.
+type keyMaxHeap []string
+
+func (h keyMaxHeap) Len() int            { return len(h) }
+func (h keyMaxHeap) Less(i, j int) bool  { return h[i] > h[j] }
+func (h keyMaxHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *keyMaxHeap) Push(x interface{}) { *h = append(*h, x.(string)) }
+func (h *keyMaxHeap) Pop() interface{} {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
 
 // listElements returns the elements of a value classified as a list.
