@@ -31,7 +31,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer inspector.Flush(avoinspector.DefaultFlushTimeout)
+	defer func() {
+		if err := inspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+			log.Print("Avo Inspector flush: ", err) // some events may not have been sent
+		}
+	}()
 
 	// ... run your program ...
 }
@@ -49,7 +53,9 @@ defer stop()
 go func() { _ = server.ListenAndServe() }()
 <-ctx.Done()                              // SIGTERM or Ctrl-C
 _ = server.Shutdown(context.Background()) // let in-flight requests finish tracking
-inspector.Flush(avoinspector.DefaultFlushTimeout)
+if err := inspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+	log.Print("Avo Inspector flush: ", err) // some events may not have been sent
+}
 ```
 
 In a serverless function, call `Flush` before the handler returns, and set `DisableBatchTimer` in
