@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -266,5 +268,42 @@ func TestWire_TestsCannotReachTheRealAPI(t *testing.T) {
 	_, _ = inspector.TrackSchemaFromEvent("E", nil)
 	if !strings.Contains(logs(), "schema sending failed: Request failed.") || time.Since(start) > 2*time.Second {
 		t.Errorf("a prod send under test must fail fast against the closed port, got %q after %v", logs(), time.Since(start))
+	}
+}
+
+// Up to maxConcurrentSends requests run at once, and the connection of each is kept for the next
+// round: rounds of concurrent sends reuse the same connections instead of reconnecting.
+func TestWire_ConcurrentSendsReuseTheirConnections(t *testing.T) {
+	var newConns atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		time.Sleep(30 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"samplingRate":1}`))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	t.Setenv(mockEndpointEnvVar, server.URL)
+	handler := newAvoNetworkCallsHandler("k", Dev)
+	for round := 0; round < 3; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < maxConcurrentSends; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}}); result.status != sendOk {
+					t.Errorf("send failed: %+v", result)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	if got := newConns.Load(); got != maxConcurrentSends {
+		t.Errorf("opened %d connections for 3 rounds of %d concurrent sends, want %d", got, maxConcurrentSends, maxConcurrentSends)
 	}
 }

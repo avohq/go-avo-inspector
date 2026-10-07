@@ -134,12 +134,23 @@ type AvoNetworkCallsHandler struct {
 	client *http.Client
 }
 
+// transport is shared by every inspector. It is http.DefaultTransport with room for an idle
+// connection per concurrent sender: the default keeps 2 per host, so each round of 4 sends would
+// reconnect twice. One shared pool, rather than one per inspector, means an inspector dropped
+// without Destroy leaves no connections of its own behind.
+var transport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = maxConcurrentSends
+	return t
+}()
+
 func newAvoNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{
 		apiKey: apiKey,
 		env:    env,
 		client: &http.Client{
-			Timeout: requestTimeout,
+			Transport: transport,
+			Timeout:   requestTimeout,
 			// Never follow a redirect: it would carry the api-key header to another host. The
 			// 3xx is returned as is and handled as a non-200.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
