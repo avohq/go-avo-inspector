@@ -138,11 +138,20 @@ type AvoNetworkCallsHandler struct {
 // connection per concurrent sender: the default keeps 2 per host, so each round of 4 sends would
 // reconnect twice. One shared pool, rather than one per inspector, means an inspector dropped
 // without Destroy leaves no connections of its own behind.
-var transport = func() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
+var transport = newTransport(http.DefaultTransport)
+
+// newTransport clones base with an idle connection per concurrent sender. A base that is not an
+// *http.Transport, such as a default transport an APM or tracing library replaced with a wrapper,
+// is used as is: the default idle limit costs reconnects, a failed assertion at init would crash.
+func newTransport(base http.RoundTripper) http.RoundTripper {
+	plain, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	t := plain.Clone()
 	t.MaxIdleConnsPerHost = maxConcurrentSends
 	return t
-}()
+}
 
 func newAvoNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *AvoNetworkCallsHandler {
 	return &AvoNetworkCallsHandler{

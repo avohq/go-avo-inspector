@@ -307,3 +307,20 @@ func TestWire_ConcurrentSendsReuseTheirConnections(t *testing.T) {
 		t.Errorf("opened %d connections for 3 rounds of %d concurrent sends, want %d", got, maxConcurrentSends, maxConcurrentSends)
 	}
 }
+
+type wrappingTransport struct{ http.RoundTripper }
+
+// A default transport replaced by a wrapper (as APM and tracing libraries do) is used as is: the
+// package must never panic at init over it. A plain *http.Transport is cloned with an idle
+// connection per concurrent sender, leaving the original untouched.
+func TestWire_TransportToleratesAReplacedDefaultTransport(t *testing.T) {
+	wrapper := wrappingTransport{http.DefaultTransport}
+	if got := newTransport(wrapper); got != (http.RoundTripper)(wrapper) {
+		t.Errorf("a wrapped default transport was not used as is: %T", got)
+	}
+	base := &http.Transport{MaxIdleConnsPerHost: 1}
+	cloned, ok := newTransport(base).(*http.Transport)
+	if !ok || cloned == base || cloned.MaxIdleConnsPerHost != maxConcurrentSends || base.MaxIdleConnsPerHost != 1 {
+		t.Errorf("expected a clone with MaxIdleConnsPerHost %d and the original unchanged, got %+v", maxConcurrentSends, cloned)
+	}
+}
