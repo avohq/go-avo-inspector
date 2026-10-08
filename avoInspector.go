@@ -104,10 +104,20 @@ type Options struct {
 	DisableBatchTimer bool
 }
 
-// GatewayOptions are the gateway values of one tracked event, passed to
-// TrackSchemaFromEventWithOptions and TrackOrderedSchemaFromEvent. Each is trimmed and left out
-// of the wire body when blank; a nil *GatewayOptions is the same as an empty one.
-type GatewayOptions struct {
+// InspectorEvent is one tracked event, the single argument of TrackSchemaFromEvent. Every field
+// is optional. The gateway fields (OutputReference, OriginHint, OriginAppVersion) are trimmed and
+// left out of the wire body when blank.
+type InspectorEvent struct {
+	// EventName is the event's name. An empty or whitespace name is sent as MissingEventName.
+	EventName string
+	// EventProperties are the event's properties. Their schema lists them sorted by key; nil means
+	// no properties.
+	EventProperties map[string]interface{}
+	// OrderedEventProperties are the event's properties in the order the schema keeps. When it is
+	// non-nil it is used instead of EventProperties, and setting both logs a warning.
+	OrderedEventProperties OrderedMap
+	// StreamId is sent verbatim as the event's streamId; empty means none.
+	StreamId string
 	// OutputReference is the gateway output this observation was bound for (e.g. "meta-x7k2q").
 	// Empty means the observation was taken at the gateway checkpoint.
 	OutputReference string
@@ -118,6 +128,11 @@ type GatewayOptions struct {
 	// the instance's AppVersion for this event; when OriginHint is set and this is empty, the
 	// event is sent with a null appVersion.
 	OriginAppVersion string
+}
+
+// gatewayFields are an event's gateway values as given, before they are trimmed.
+type gatewayFields struct {
+	outputReference, originHint, originAppVersion string
 }
 
 // AvoInspector extracts event schemas and reports them to the Avo Inspector API. It is safe for
@@ -288,18 +303,9 @@ func safeExtractSchema(eventProperties interface{}) (schema []Property) {
 	return extractSchema(eventProperties)
 }
 
-// TrackSchemaFromEvent extracts the schema of eventProperties and queues it for sending. It is
-// TrackSchemaFromEventWithOptions with no stream id and no gateway values.
-func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
-	return inspector.TrackSchemaFromEventWithOptions(eventName, eventProperties, "", nil)
-}
-
-// TrackSchemaFromEventWithOptions extracts the schema of eventProperties, samples the event, and
-// adds it to the pending batch, which is sent when it reaches the batch size, when the scheduled
-// flush runs, or on Flush.
-//
-// streamId is sent verbatim as the event's streamId; "" means none. gateway carries the event's
-// gateway values; nil means none, the same as &GatewayOptions{}.
+// TrackSchemaFromEvent extracts the schema of the event's properties, samples the event, and adds
+// it to the pending batch, which is sent when it reaches the batch size, when the scheduled flush
+// runs, or on Flush.
 //
 // It returns the extracted schema. The returned error is non-nil only for an internal failure
 // before the event was queued; delivery failures are never returned. With a batch size of 1
@@ -308,17 +314,24 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 // or whitespace is sent as MissingEventName, and a rate-limited line reports it. While 1,000 or
 // more events wait to be sent, the call waits for room before returning, for at most about the
 // 10-second request timeout (backpressure); Destroy releases it.
-func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, streamId string, gateway *GatewayOptions) ([]Property, error) {
-	return inspector.track(eventName, eventProperties, streamId, gateway)
+func (inspector *AvoInspector) TrackSchemaFromEvent(event InspectorEvent) ([]Property, error) {
+	var properties interface{} = event.EventProperties
+	if event.OrderedEventProperties != nil {
+		if event.EventProperties != nil {
+			logLimited("both-event-properties", 1, func(_, suppressed int, seconds int64) string {
+				return "InspectorEvent has both EventProperties and OrderedEventProperties; using OrderedEventProperties." + suppressedSuffix(suppressed, seconds)
+			})
+		}
+		properties = event.OrderedEventProperties
+	}
+	return inspector.track(event.EventName, properties, event.StreamId, gatewayFields{
+		outputReference:  event.OutputReference,
+		originHint:       event.OriginHint,
+		originAppVersion: event.OriginAppVersion,
+	})
 }
 
-// TrackOrderedSchemaFromEvent is TrackSchemaFromEventWithOptions for properties given as an
-// OrderedMap, whose order the schema keeps.
-func (inspector *AvoInspector) TrackOrderedSchemaFromEvent(eventName string, eventProperties OrderedMap, streamId string, gateway *GatewayOptions) ([]Property, error) {
-	return inspector.track(eventName, eventProperties, streamId, gateway)
-}
-
-func (inspector *AvoInspector) track(eventName string, eventProperties interface{}, streamId string, gateway *GatewayOptions) (schema []Property, err error) {
+func (inspector *AvoInspector) track(eventName string, eventProperties interface{}, streamId string, gateway gatewayFields) (schema []Property, err error) {
 	inspector.mu.Lock()
 	destroyed, samplingRate := inspector.destroyed, inspector.samplingRate
 	inspector.mu.Unlock()
@@ -355,11 +368,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		return schema, nil
 	}
 
-	var options GatewayOptions
-	if gateway != nil {
-		options = *gateway
-	}
-	event := inspector.newWireEvent(eventName, streamId, samplingRate, schema, options)
+	event := inspector.newWireEvent(eventName, streamId, samplingRate, schema, gateway)
 
 	var (
 		batch                   *queuedBatch
@@ -416,11 +425,11 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 }
 
 // newWireEvent builds the wire body of one event, resolving the gateway options (SPEC.md §7.3.6).
-func (inspector *AvoInspector) newWireEvent(eventName, streamId string, samplingRate float64, schema []Property, options GatewayOptions) wireEvent {
-	outputReference := strings.TrimSpace(options.OutputReference)
-	originHint := strings.TrimSpace(options.OriginHint)
+func (inspector *AvoInspector) newWireEvent(eventName, streamId string, samplingRate float64, schema []Property, gateway gatewayFields) wireEvent {
+	outputReference := strings.TrimSpace(gateway.outputReference)
+	originHint := strings.TrimSpace(gateway.originHint)
 	var appVersion *string
-	if originAppVersion := strings.TrimSpace(options.OriginAppVersion); originAppVersion != "" {
+	if originAppVersion := strings.TrimSpace(gateway.originAppVersion); originAppVersion != "" {
 		appVersion = &originAppVersion
 	} else if originHint == "" {
 		version := inspector.version

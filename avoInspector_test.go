@@ -123,7 +123,7 @@ func TestTrack_DevSendsImmediatelyAndReturnsSchema(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Dev, AppName: "MyApp"})
 
-	schema, err := inspector.TrackSchemaFromEvent("TestEvent", map[string]interface{}{"param1": "value1", "param2": 123})
+	schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "TestEvent", EventProperties: map[string]interface{}{"param1": "value1", "param2": 123}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,13 +140,13 @@ func TestTrack_DevSendsImmediatelyAndReturnsSchema(t *testing.T) {
 func TestTrack_HTTPFailuresAreNotReturnedAsErrors(t *testing.T) {
 	newTestServer(t, respondWith(400, `{"ok":false,"error":"bad key"}`))
 	inspector := mustInspector(t, Options{Env: Dev})
-	schema, err := inspector.TrackSchemaFromEvent("Event", map[string]interface{}{"form_id": "signup"})
+	schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Event", EventProperties: map[string]interface{}{"form_id": "signup"}})
 	if err != nil || schema == nil || len(schema) != 0 {
 		t.Errorf("non-200: expected ([], nil), got (%#v, %v)", schema, err)
 	}
 
 	t.Setenv(mockEndpointEnvVar, "http://127.0.0.1:1")
-	schema, err = inspector.TrackSchemaFromEvent("Event", map[string]interface{}{"form_id": "signup"})
+	schema, err = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Event", EventProperties: map[string]interface{}{"form_id": "signup"}})
 	if err != nil || len(schema) != 1 {
 		t.Errorf("network error: expected (schema, nil), got (%#v, %v)", schema, err)
 	}
@@ -157,7 +157,7 @@ func TestTrack_SamplingRateZeroDropsWithoutSending(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Dev})
 	inspector.setSamplingRate(0)
 	for i := 0; i < 50; i++ {
-		schema, err := inspector.TrackSchemaFromEvent("Dropped", map[string]interface{}{"x": 1})
+		schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Dropped", EventProperties: map[string]interface{}{"x": 1}})
 		if err != nil || len(schema) != 1 {
 			t.Fatalf("sampled-out event must still return its schema, got (%#v, %v)", schema, err)
 		}
@@ -193,7 +193,7 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
 			// Send directly, bypassing the per-event sampling decision.
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, GatewayOptions{})
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -228,7 +228,7 @@ func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
 			})
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, GatewayOptions{})
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -249,7 +249,7 @@ func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 	server := newTestServer(t, respondWith(200, `{"samplingRate":1}`))
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.setSamplingRate(1)
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	inspector.setSamplingRate(0.999999)
 	for i := 0; ; i++ {
 		// Retry the (very likely) sampled-in second event until it is enqueued.
@@ -259,7 +259,7 @@ func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 		if n == 2 || i > 100 {
 			break
 		}
-		_, _ = inspector.TrackSchemaFromEvent("E2", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2"})
 	}
 	_ = inspector.Flush(time.Second)
 	requests := server.captured()
@@ -276,7 +276,7 @@ func TestBatching_SizeTriggerAndFlush(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 3, DisableBatchTimer: true})
 	for i := 1; i <= 4; i++ {
-		schema, err := inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), map[string]interface{}{"a": i})
+		schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("E%d", i), EventProperties: map[string]interface{}{"a": i}})
 		if err != nil || len(schema) != 1 {
 			t.Fatalf("track %d: unexpected (%#v, %v)", i, schema, err)
 		}
@@ -298,7 +298,7 @@ func TestBatching_MaxQueueSizeDropsOldest(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
 	for _, name := range []string{"E1", "E2", "E3"} {
-		_, _ = inspector.TrackSchemaFromEvent(name, nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
 	_ = inspector.Flush(time.Second)
 	requests := server.captured()
@@ -311,7 +311,7 @@ func TestBatching_MaxQueueSizeDropsOldest(t *testing.T) {
 func TestBatching_TimerFlushesIdleBatch(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: 0.05})
-	_, _ = inspector.TrackSchemaFromEvent("Idle", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Idle"})
 	deadline := time.Now().Add(2 * time.Second)
 	for len(server.captured()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -324,7 +324,7 @@ func TestBatching_TimerFlushesIdleBatch(t *testing.T) {
 func TestBatching_DisableBatchTimer(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: 0.02, DisableBatchTimer: true})
-	_, _ = inspector.TrackSchemaFromEvent("Idle", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Idle"})
 	time.Sleep(200 * time.Millisecond)
 	if n := len(server.captured()); n != 0 {
 		t.Errorf("expected no scheduled flush with DisableBatchTimer, got %d requests", n)
@@ -348,11 +348,11 @@ func TestBatching_TransientFailureDropsBatch(t *testing.T) {
 	})
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
 	for _, name := range []string{"E1", "E2"} {
-		_, _ = inspector.TrackSchemaFromEvent(name, nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
 	_ = inspector.Flush(time.Second)
 	for _, name := range []string{"E3", "E4"} {
-		_, _ = inspector.TrackSchemaFromEvent(name, nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
 	_ = inspector.Flush(time.Second)
 	_ = inspector.Flush(time.Second)
@@ -370,10 +370,10 @@ func TestDestroy_DiscardsPendingAndStopsTracking(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: 0.02})
 	inspector.setSamplingRate(0.75)
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	inspector.Destroy()
 
-	schema, err := inspector.TrackSchemaFromEvent("E2", map[string]interface{}{"a": 1})
+	schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2", EventProperties: map[string]interface{}{"a": 1}})
 	if err != nil || schema == nil || len(schema) != 0 {
 		t.Errorf("after Destroy expected ([], nil), got (%#v, %v)", schema, err)
 	}
@@ -399,7 +399,7 @@ func TestFlush_TimesOutOnHungSend(t *testing.T) {
 	newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
 	defer close(release)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	start := time.Now()
 	if err := inspector.Flush(50 * time.Millisecond); err != ErrFlushTimeout {
 		t.Errorf("expected ErrFlushTimeout, got %v", err)
@@ -421,7 +421,7 @@ func TestBatching_ConcurrentTracksAreSentExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("C%d", i), nil)
+			_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("C%d", i)})
 			if i%50 == 0 {
 				_ = inspector.Flush(time.Second)
 			}
@@ -497,7 +497,7 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 			logs := captureLogs(t)
 			inspector := newQuietInspector(t)
 			tc.setup(t, inspector)
-			_, _ = inspector.TrackSchemaFromEvent("E", nil)
+			_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 			_ = inspector.Flush(2 * time.Second)
 			output := logs()
 			if !strings.Contains(output, tc.expected) {
@@ -515,7 +515,7 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 		previous := newGuid
 		newGuid = func() string { panic("boom") }
 		t.Cleanup(func() { newGuid = previous })
-		schema, err := inspector.TrackSchemaFromEvent("E", nil)
+		schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 		if err == nil || err.Error() != internalErrorMessage || schema != nil {
 			t.Fatalf("expected the internal error, got (%#v, %v)", schema, err)
 		}
@@ -533,7 +533,7 @@ func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 	server := newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
 	defer close(release)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	start := time.Now()
 	// The send it started is still in flight, so the instance was not drained.
 	if err := inspector.Flush(0); err != ErrFlushTimeout {
@@ -554,7 +554,7 @@ func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 func TestFlush_NegativeWaitsForInFlightSends(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if err := inspector.Flush(-1); err != nil {
 		t.Errorf("expected nil, got %v", err)
 	}
@@ -570,7 +570,7 @@ func TestBatchTimer_IdleInspectorHoldsNoGoroutine(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, BatchFlushSeconds: 3600})
 	inspector.EnableLogging(false)
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if n := runtime.NumGoroutine(); n > baseline {
 		t.Errorf("an armed flush timer must not hold a goroutine: %d goroutines, baseline %d", n, baseline)
 	}
@@ -594,7 +594,7 @@ func TestBatchTimer_DroppedInspectorIsCollected(t *testing.T) {
 			t.Fatal(err)
 		}
 		inspector.EnableLogging(false)
-		_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 		_ = inspector.Flush(2 * time.Second)
 		runtime.SetFinalizer(inspector, func(*AvoInspector) { close(collected) })
 	}()
@@ -623,15 +623,15 @@ func TestBatchTimer_ArmedOnlyWhilePending(t *testing.T) {
 	if armed() {
 		t.Fatalf("timer armed before any event")
 	}
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if !armed() {
 		t.Fatalf("timer not armed by the first event")
 	}
-	_, _ = inspector.TrackSchemaFromEvent("E2", nil) // size trigger swaps the batch out
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2"}) // size trigger swaps the batch out
 	if armed() {
 		t.Errorf("timer still armed after the size trigger")
 	}
-	_, _ = inspector.TrackSchemaFromEvent("E3", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E3"})
 	_ = inspector.Flush(2 * time.Second)
 	if armed() {
 		t.Errorf("timer still armed after Flush")
@@ -657,7 +657,7 @@ func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Cleanup(func() { testHookBeforeSend = nil })
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if n := <-flushed; n != 1 {
 		t.Errorf("Flush returned before the taken batch was sent: %d requests captured", n)
 	}
@@ -708,7 +708,7 @@ func TestNewAvoInspector_BatchFlushSecondsIsCapped(t *testing.T) {
 			if !strings.Contains(logs(), "batchFlushSeconds") {
 				t.Errorf("expected a warning, got %q", logs())
 			}
-			_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+			_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 			time.Sleep(200 * time.Millisecond)
 			if n := len(server.captured()); n != 0 {
 				t.Errorf("the timer fired early: %d requests", n)
@@ -756,7 +756,7 @@ func TestDestroy_AbandonedSendIsNotLogged(t *testing.T) {
 	logs := captureLogs(t)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	_ = inspector.Flush(0)
 	inspector.mu.Lock()
 	var sends []chan struct{}
@@ -797,7 +797,7 @@ func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
 		t.Fatalf("an invalid apiKey reached the wire: %d requests", n)
 	}
 	inspector := mustInspector(t, Options{ApiKey: "klucz-ą", Env: Dev})
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if requests := server.captured(); len(requests) != 1 || requests[0].header.Get("api-key") != "klucz-ą" {
 		t.Errorf("a valid multibyte apiKey must be accepted and sent, got %d requests", len(requests))
 	}
@@ -818,15 +818,15 @@ func TestLogging_NeverShowsPropertyValues(t *testing.T) {
 
 	server := newTestServer(t, respondWith(500, `{}`))
 	dev := mustInspector(t, Options{ApiKey: apiKey, Env: Dev})
-	_, _ = dev.TrackSchemaFromEvent("Signed Up", properties)
+	_, _ = dev.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties})
 
 	staging := mustInspector(t, Options{ApiKey: apiKey, Env: Staging, BatchSize: 30, MaxQueueSize: 1, DisableBatchTimer: true})
 	staging.EnableLogging(true)
-	_, _ = staging.TrackSchemaFromEventWithOptions("Signed Up", properties, "s:1", &GatewayOptions{OriginHint: "web"})
-	_, _ = staging.TrackSchemaFromEvent("Signed Up", properties)
+	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties, StreamId: "s:1", OriginHint: "web"})
+	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties})
 	_ = staging.Flush(2 * time.Second)
 	server.Close()
-	_, _ = staging.TrackSchemaFromEvent("Signed Up", properties)
+	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties})
 	_ = staging.Flush(2 * time.Second)
 
 	output := logs()
@@ -899,7 +899,7 @@ func TestLogging_DroppedEventsAreRateLimited(t *testing.T) {
 	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 10; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", map[string]interface{}{"email": "PII-MARKER-123@example.com"})
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"email": "PII-MARKER-123@example.com"}})
 	}
 	if n := countLines(logs(), "(queue full)"); n != 1 {
 		t.Fatalf("expected one dropped line in the window, got %d:\n%s", n, logs())
@@ -908,7 +908,7 @@ func TestLogging_DroppedEventsAreRateLimited(t *testing.T) {
 		t.Errorf("unexpected first line:\n%s", logs())
 	}
 	advance(logRateWindow)
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if !strings.Contains(logs(), "[Avo Inspector] dropped 8 event(s) (queue full) in the last 10s.") {
 		t.Errorf("expected the 7 suppressed drops plus this one to be reported:\n%s", logs())
 	}
@@ -935,13 +935,13 @@ func TestLogging_Non200IsRateLimitedPerStatus(t *testing.T) {
 	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 1, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	mu.Lock()
 	status = 400
 	mu.Unlock()
 	for i := 0; i < 3; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	output := logs()
 	if countLines(output, "rejected with HTTP 500") != 1 || countLines(output, "rejected with HTTP 400") != 1 {
@@ -954,7 +954,7 @@ func TestLogging_Non200IsRateLimitedPerStatus(t *testing.T) {
 	mu.Lock()
 	status = 500
 	mu.Unlock()
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if !strings.Contains(logs(), "[Avo Inspector] 5 batch(es) rejected with HTTP 500 in the last 10s.") {
 		t.Errorf("expected the 4 suppressed rejections plus this one:\n%s", logs())
 	}
@@ -974,7 +974,7 @@ func TestLogging_FailureStormIsRateLimited(t *testing.T) {
 	inspector := mustInspector(t, Options{ApiKey: "secret-key-789", Env: Staging, BatchSize: 1, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	if n := countLines(logs(), "schema sending failed"); n != 1 {
 		t.Fatalf("expected one failed line in the window, got %d:\n%s", n, logs())
@@ -983,7 +983,7 @@ func TestLogging_FailureStormIsRateLimited(t *testing.T) {
 		t.Errorf("unexpected failed line:\n%s", logs())
 	}
 	advance(logRateWindow)
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if !strings.Contains(logs(), "[Avo Inspector] schema sending failed: Request failed. (4 more in the last 10s)") {
 		t.Errorf("expected the suppressed count:\n%s", logs())
 	}
@@ -1002,7 +1002,7 @@ func TestLogging_InternalErrorsAreRateLimited(t *testing.T) {
 	newGuid = func() string { panic("boom") }
 	t.Cleanup(func() { newGuid = previous })
 	for i := 0; i < 3; i++ {
-		if _, err := inspector.TrackSchemaFromEvent("E", nil); err == nil {
+		if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"}); err == nil {
 			t.Fatal("expected the internal error")
 		}
 	}
@@ -1018,7 +1018,7 @@ func TestLogging_SamplingDropsAreSilentWhenLoggingIsOff(t *testing.T) {
 	inspector.EnableLogging(false)
 	inspector.setSamplingRate(0)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	if output := logs(); output != "" {
 		t.Errorf("expected no output, got %q", output)
@@ -1064,13 +1064,13 @@ func TestLogging_StreamIdColonWarningIsRateLimited(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, "user:42", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", StreamId: "user:42"})
 	}
 	if n := countLines(logs(), "streamId contains ':'"); n != 1 {
 		t.Fatalf("expected one warning in the window, got %d:\n%s", n, logs())
 	}
 	advance(logRateWindow)
-	_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, "user:42", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", StreamId: "user:42"})
 	if !strings.Contains(logs(), "[Avo Inspector] streamId contains ':'; using the value verbatim. (4 more in the last 10s)") {
 		t.Errorf("expected the suppressed count:\n%s", logs())
 	}
@@ -1125,7 +1125,7 @@ func TestSendModel_AtMostFourSendsAtOnce(t *testing.T) {
 	inspector.EnableLogging(false)
 	baseline := runtime.NumGoroutine()
 	for i := 0; i < 100; i++ {
-		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("E%d", i)})
 	}
 	time.Sleep(300 * time.Millisecond)
 	// Each request in progress also holds a few net/http client and server goroutines.
@@ -1150,7 +1150,7 @@ func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 9000; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	_ = inspector.Flush(10 * time.Second)
 	if n := len(deliveredNames(server)); n != 9000 {
@@ -1174,7 +1174,7 @@ func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 	inspector.EnableLogging(false)
 	const total = 20010
 	for i := 0; i < total; i++ {
-		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("E%d", i)})
 	}
 	release()
 	// Past the drop line's window, so Flush reports the drops held since.
@@ -1219,7 +1219,7 @@ func TestSendModel_DestroyDiscardsWaitingBatches(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 40; i++ {
-		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("E%d", i), nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("E%d", i)})
 	}
 	time.Sleep(200 * time.Millisecond)
 	inspector.Destroy()
@@ -1247,7 +1247,7 @@ func TestLogging_CaughtErrorsAreLoggedByTypeOnly(t *testing.T) {
 	inspector.EnableLogging(true)
 
 	// User methods are never called by extraction, so a panicking String or MarshalJSON is inert.
-	if _, err := inspector.TrackSchemaFromEvent("E", map[string]interface{}{"v": markerValue{}, "p": &markerValue{}}); err != nil {
+	if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"v": markerValue{}, "p": &markerValue{}}}); err != nil {
 		t.Errorf("tracking a value with panicking methods failed: %v", err)
 	}
 
@@ -1255,7 +1255,7 @@ func TestLogging_CaughtErrorsAreLoggedByTypeOnly(t *testing.T) {
 	previous := newGuid
 	newGuid = func() string { panic(fmt.Errorf("guid failed for %s", "PII-MARKER-777@example.com")) }
 	t.Cleanup(func() { newGuid = previous })
-	if _, err := inspector.TrackSchemaFromEvent("E", nil); err == nil || err.Error() != internalErrorMessage {
+	if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"}); err == nil || err.Error() != internalErrorMessage {
 		t.Fatalf("expected the internal error, got %v", err)
 	}
 
@@ -1275,7 +1275,7 @@ func TestLogging_SerializationFailureUsesAFixedLabel(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Dev})
 	inspector.EnableLogging(false)
 	inspector.setSamplingRate(math.NaN()) // NaN keeps the event and cannot be encoded as JSON
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	output := logs()
 	if !strings.Contains(output, "schema sending failed: Request serialization failed.") || strings.Contains(output, "json:") {
 		t.Errorf("expected the fixed serialization label:\n%s", output)
@@ -1304,13 +1304,13 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 
 	// Enough panicking batches to occupy every sender slot more than once.
 	for i := 0; i < 2*(maxConcurrentSends+1); i++ {
-		_, _ = inspector.TrackSchemaFromEvent(fmt.Sprintf("Lost%d", i), nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("Lost%d", i)})
 	}
 	if err := inspector.Flush(2 * time.Second); err != nil {
 		t.Fatalf("Flush after panicking sends: %v", err)
 	}
-	_, _ = inspector.TrackSchemaFromEvent("Later1", nil)
-	_, _ = inspector.TrackSchemaFromEvent("Later2", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later1"})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later2"})
 	advance(logRateWindow)
 	if err := inspector.Flush(2 * time.Second); err != nil {
 		t.Fatalf("Flush after recovery: %v", err)
@@ -1354,7 +1354,7 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 				t.Cleanup(func() { trackingEndpoint = "http://127.0.0.1:1" })
 				inspector := mustInspector(t, Options{Env: env, BatchSize: 1, DisableBatchTimer: true})
 				inspector.EnableLogging(false)
-				schema, err := inspector.TrackSchemaFromEvent(name, map[string]interface{}{"a": 1})
+				schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name, EventProperties: map[string]interface{}{"a": 1}})
 				if err != nil || len(schema) != 1 || schema[0].PropertyName != "a" || schema[0].PropertyType != "int" {
 					t.Errorf("expected the extracted schema and no error, got (%#v, %v)", schema, err)
 				}
@@ -1371,9 +1371,9 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 				if n := countLines(logs(), line); n != 1 {
 					t.Errorf("expected one line, got %d:\n%s", n, logs())
 				}
-				_, _ = inspector.TrackSchemaFromEvent(name, nil)
+				_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 				advance(logRateWindow)
-				_, _ = inspector.TrackSchemaFromEvent(name, nil)
+				_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 				if !strings.Contains(logs(), `[Avo Inspector] 2 event(s) tracked without an event name in the last 10s, sent as "Missing Event Name".`) {
 					t.Errorf("expected the suppressed one counted in the next window:\n%s", logs())
 				}
@@ -1383,7 +1383,7 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Dev})
-	schema, err := inspector.TrackSchemaFromEvent(" Signed Up ", map[string]interface{}{"a": 1})
+	schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: " Signed Up ", EventProperties: map[string]interface{}{"a": 1}})
 	if err != nil || len(schema) != 1 || len(server.captured()) != 1 || server.captured()[0].events[0]["eventName"] != " Signed Up " {
 		t.Errorf("a valid name must be tracked unchanged, got (%#v, %v)", schema, err)
 	}
@@ -1398,7 +1398,7 @@ func TestLogging_FlushReportsPendingCountsAfterTheWindow(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 10; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	if !strings.Contains(logs(), "[Avo Inspector] dropped 1 event(s) (queue full) in the last 1s.") {
 		t.Fatalf("expected the first drop printed at once:\n%s", logs())
@@ -1431,7 +1431,7 @@ func TestLogging_DestroyReportsHeldDropsInsideTheWindow(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 10; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	advance(3 * time.Second)
 	inspector.Destroy()
@@ -1447,10 +1447,10 @@ func TestLogging_StaleCountReportsItsRealSpan(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, MaxQueueSize: 2, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 10; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	advance(time.Hour)
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if !strings.Contains(logs(), "[Avo Inspector] dropped 8 event(s) (queue full) in the last 3600s.") {
 		t.Errorf("expected the real span of the stale count:\n%s", logs())
 	}
@@ -1464,7 +1464,7 @@ func TestLogging_DestroyReportsPendingCounts(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 1, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("E", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
 	advance(2 * time.Second)
 	inspector.Destroy()
@@ -1488,8 +1488,8 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 	}
 	t.Cleanup(func() { testHookBeforeSend = nil })
 
-	_, _ = inspector.TrackSchemaFromEvent("Lost1", nil)
-	if _, err := inspector.TrackSchemaFromEvent("Lost2", nil); err == nil || err.Error() != internalErrorMessage {
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Lost1"})
+	if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Lost2"}); err == nil || err.Error() != internalErrorMessage {
 		t.Fatalf("expected the internal error from the panicking call, got %v", err)
 	}
 	start := time.Now()
@@ -1502,8 +1502,8 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 	if active != 0 || inFlight != 0 {
 		t.Errorf("expected the slot and the in-flight entry released, got %d senders and %d entries", active, inFlight)
 	}
-	_, _ = inspector.TrackSchemaFromEvent("Later1", nil)
-	_, _ = inspector.TrackSchemaFromEvent("Later2", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later1"})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later2"})
 	_ = inspector.Flush(2 * time.Second)
 	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
 		t.Errorf("expected only the later batch delivered, got %v", names)
@@ -1521,14 +1521,14 @@ func TestFlush_NilMeansDrained(t *testing.T) {
 	if err := inspector.Flush(0); err != nil {
 		t.Errorf("Flush(0) on an empty instance: expected nil, got %v", err)
 	}
-	_, _ = inspector.TrackSchemaFromEvent("E1", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if err := inspector.Flush(2 * time.Second); err != nil {
 		t.Errorf("Flush that waited for its send: expected nil, got %v", err)
 	}
 	if err := inspector.Flush(0); err != nil {
 		t.Errorf("Flush(0) once drained: expected nil, got %v", err)
 	}
-	_, _ = inspector.TrackSchemaFromEvent("E2", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2"})
 	inspector.Destroy()
 	if err := inspector.Flush(0); err != nil {
 		t.Errorf("Flush on a destroyed instance: expected nil, got %v", err)
@@ -1540,11 +1540,11 @@ func TestFlush_NilMeansDrained(t *testing.T) {
 func TestTrack_ReturnedSchemaIsACopy(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-	schema, _ := inspector.TrackSchemaFromEvent("Mutate", map[string]interface{}{
+	schema, _ := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Mutate", EventProperties: map[string]interface{}{
 		"a":    1,
 		"list": []interface{}{"x", map[string]interface{}{"k": 1}, []interface{}{2}},
 		"obj":  map[string]interface{}{"inner": map[string]interface{}{"n": 1}},
-	})
+	}})
 	schema[0].PropertyType = "MUTATED"
 	schema[1].ListChildren[0] = "MUTATED"
 	schema[1].ListChildren[1].([]Property)[0].PropertyType = "MUTATED"
@@ -1582,7 +1582,7 @@ func TestBackpressure_TightLoopDeliversEverything(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 20000; i++ {
-		_, _ = inspector.TrackSchemaFromEvent("Loop", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Loop"})
 	}
 	_ = inspector.Flush(30 * time.Second)
 	if n := deliveredCount(server); n != 20000 {
@@ -1605,7 +1605,7 @@ func TestBackpressure_ConcurrentTrackers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 1500; i++ {
-				_, _ = inspector.TrackSchemaFromEvent("Loop", nil)
+				_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Loop"})
 			}
 		}()
 	}
@@ -1624,7 +1624,7 @@ func TestBackpressure_ConcurrentTrackers(t *testing.T) {
 func trackUntilBlocked(inspector *AvoInspector, threshold time.Duration, limit int) time.Duration {
 	for i := 0; i < limit; i++ {
 		start := time.Now()
-		_, _ = inspector.TrackSchemaFromEvent("Fill", nil)
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Fill"})
 		if elapsed := time.Since(start); elapsed > threshold {
 			return elapsed
 		}
@@ -1669,5 +1669,68 @@ func TestBackpressure_DestroyReleasesWaiters(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Destroy did not release the waiting call")
+	}
+}
+
+// OrderedEventProperties keep their order in the schema and on the wire; EventProperties are
+// sorted by key. Neither set is an event with no properties.
+func TestTrack_OrderedEventPropertiesKeepTheirOrder(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	ordered, _ := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", OrderedEventProperties: OrderedMap{{"z", 1}, {"a", "x"}}})
+	sorted, _ := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"z": 1, "a": "x"}})
+	none, _ := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
+	assertSchemaJSON(t, ordered, `[{"propertyName":"z","propertyType":"int"},{"propertyName":"a","propertyType":"string"}]`)
+	assertSchemaJSON(t, sorted, `[{"propertyName":"a","propertyType":"string"},{"propertyName":"z","propertyType":"int"}]`)
+	assertSchemaJSON(t, none, `[]`)
+	requests := server.captured()
+	if len(requests) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(requests))
+	}
+	sent, _ := json.Marshal(requests[0].events[0]["eventProperties"])
+	if string(sent) != `[{"propertyName":"z","propertyType":"int"},{"propertyName":"a","propertyType":"string"}]` {
+		t.Errorf("the wire must keep the given order, got %s", sent)
+	}
+}
+
+// When both property fields are set, OrderedEventProperties are used and an always-on,
+// rate-limited warning says so, without logging any value. An empty, non-nil OrderedMap counts as
+// set.
+func TestTrack_OrderedEventPropertiesTakePrecedence(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	inspector.EnableLogging(false)
+	both := InspectorEvent{
+		EventName:              "E",
+		EventProperties:        map[string]interface{}{"fromMap": "PII-MARKER"},
+		OrderedEventProperties: OrderedMap{{"fromOrdered", 1}},
+	}
+	for i := 0; i < 3; i++ {
+		schema, _ := inspector.TrackSchemaFromEvent(both)
+		assertSchemaJSON(t, schema, `[{"propertyName":"fromOrdered","propertyType":"int"}]`)
+	}
+	empty, _ := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"a": 1}, OrderedEventProperties: OrderedMap{}})
+	assertSchemaJSON(t, empty, `[]`)
+	const warning = "InspectorEvent has both EventProperties and OrderedEventProperties; using OrderedEventProperties."
+	if n := countLines(logs(), warning); n != 1 {
+		t.Fatalf("expected one warning in the window, got %d:\n%s", n, logs())
+	}
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEvent(both)
+	if !strings.Contains(logs(), warning+" (3 more in the last 10s)") {
+		t.Errorf("expected the suppressed count:\n%s", logs())
+	}
+	if strings.Contains(logs(), "PII-MARKER") || strings.Contains(logs(), "fromMap") {
+		t.Errorf("no property name or value may be logged:\n%s", logs())
+	}
+	// One property set alone never warns.
+	before := countLines(logs(), warning)
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", OrderedEventProperties: OrderedMap{{"a", 1}}})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"a": 1}})
+	if countLines(logs(), warning) != before {
+		t.Errorf("a single property field must not warn:\n%s", logs())
 	}
 }

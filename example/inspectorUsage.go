@@ -33,7 +33,10 @@ func main() {
 		}
 	}()
 
-	call, err := avoInspector.TrackSchemaFromEvent("Test Event", data)
+	call, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+		EventName:       "Test Event",
+		EventProperties: data,
+	})
 	if err != nil {
 		log.Print("Avo Inspector track: ", err)
 		return

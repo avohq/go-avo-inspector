@@ -23,8 +23,8 @@ func TestWire_BodyAndHeaders(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Dev, AppName: "TestApp"})
 
-	_, err := inspector.TrackSchemaFromEventWithOptions("User Signed Up",
-		map[string]interface{}{"plan": "pro", "seats": 3}, "stream-abc", nil)
+	_, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "User Signed Up",
+		EventProperties: map[string]interface{}{"plan": "pro", "seats": 3}, StreamId: "stream-abc"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestWire_GzipAtThreshold(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		properties["attribute_"+strconv.Itoa(i)] = "value"
 	}
-	_, _ = inspector.TrackSchemaFromEvent("Large", properties)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Large", EventProperties: properties})
 	requests := server.captured()
 	if len(requests) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(requests))
@@ -159,26 +159,28 @@ func TestWire_HeaderControlCharacterGuard(t *testing.T) {
 	}
 }
 
-func TestWire_GatewayOptions(t *testing.T) {
+func TestWire_GatewayFields(t *testing.T) {
 	testCases := []struct {
 		name            string
-		gateway         *GatewayOptions
+		event           InspectorEvent
 		appVersion      interface{}
 		outputReference interface{}
 		originHint      interface{}
 	}{
-		{"all set, trimmed", &GatewayOptions{OutputReference: "  meta-x7k2q\nb  ", OriginHint: "\tandroid\rtv \n", OriginAppVersion: "  4.2.0 "}, "4.2.0", "meta-x7k2q\nb", "android\rtv"},
-		{"hint without version", &GatewayOptions{OriginHint: " android "}, nil, "<absent>", "android"},
-		{"version without hint", &GatewayOptions{OutputReference: " meta ", OriginAppVersion: " 4.2.0 "}, "4.2.0", "meta", "<absent>"},
-		{"blank values are absent", &GatewayOptions{OutputReference: "   ", OriginHint: "", OriginAppVersion: "  "}, "1.0.0", "<absent>", "<absent>"},
-		{"empty", &GatewayOptions{}, "1.0.0", "<absent>", "<absent>"},
-		{"nil is the same as empty", nil, "1.0.0", "<absent>", "<absent>"},
+		{"all set, trimmed", InspectorEvent{OutputReference: "  meta-x7k2q\nb  ", OriginHint: "\tandroid\rtv \n", OriginAppVersion: "  4.2.0 "}, "4.2.0", "meta-x7k2q\nb", "android\rtv"},
+		{"hint without version", InspectorEvent{OriginHint: " android "}, nil, "<absent>", "android"},
+		{"version without hint", InspectorEvent{OutputReference: " meta ", OriginAppVersion: " 4.2.0 "}, "4.2.0", "meta", "<absent>"},
+		{"blank values are absent", InspectorEvent{OutputReference: "   ", OriginHint: "", OriginAppVersion: "  "}, "1.0.0", "<absent>", "<absent>"},
+		{"empty", InspectorEvent{}, "1.0.0", "<absent>", "<absent>"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newTestServer(t, nil)
 			inspector := mustInspector(t, Options{Env: Dev})
-			_, _ = inspector.TrackSchemaFromEventWithOptions("purchase", map[string]interface{}{"appVersion": true}, "", tc.gateway)
+			tracked := tc.event
+			tracked.EventName = "purchase"
+			tracked.EventProperties = map[string]interface{}{"appVersion": true}
+			_, _ = inspector.TrackSchemaFromEvent(tracked)
 			event := server.captured()[0].events[0]
 			if value, ok := event["appVersion"]; !ok || value != tc.appVersion {
 				t.Errorf("appVersion: expected %v, got %v (present %v)", tc.appVersion, value, ok)
@@ -195,7 +197,7 @@ func TestWire_GatewayOptions(t *testing.T) {
 			}
 			properties := event["eventProperties"].([]interface{})
 			if len(properties) != 1 || properties[0].(map[string]interface{})["propertyName"] != "appVersion" {
-				t.Errorf("options must not touch the schema: %v", properties)
+				t.Errorf("the gateway fields must not touch the schema: %v", properties)
 			}
 		})
 	}
@@ -267,7 +269,7 @@ func TestWire_TestsCannotReachTheRealAPI(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Prod, BatchSize: 1, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	start := time.Now()
-	_, _ = inspector.TrackSchemaFromEvent("E", nil)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	if !strings.Contains(logs(), "schema sending failed: Request failed.") || time.Since(start) > 2*time.Second {
 		t.Errorf("a prod send under test must fail fast against the closed port, got %q after %v", logs(), time.Since(start))
 	}
