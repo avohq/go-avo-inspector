@@ -392,8 +392,8 @@ func runSequence(inspector *avoinspector.AvoInspector, steps []step) []stepRecor
 			wg.Wait()
 			records = append(records, stepRecord{"trackN", "resolve", s.count})
 		case "flush":
-			_ = inspector.Flush(s.timeout)
-			records = append(records, stepRecord{"flush", "resolve", nil})
+			// The value is whether the flush drained: Flush returns nil, not ErrFlushTimeout.
+			records = append(records, stepRecord{"flush", "resolve", inspector.Flush(s.timeout) == nil})
 		case "destroy":
 			inspector.Destroy()
 			records = append(records, stepRecord{"destroy", "resolve", nil})

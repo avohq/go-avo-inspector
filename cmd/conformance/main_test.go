@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -247,5 +251,60 @@ func TestHarness_IgnoresUnknownFields(t *testing.T) {
 		if code := run(strings.NewReader(tc.envelope+"\n"), &stdout); code != tc.want {
 			t.Errorf("%s: exit code %d, want %d: %s", tc.name, code, tc.want, strings.TrimSpace(stdout.String()))
 		}
+	}
+}
+
+// A flush step's value is whether the flush drained: true when Flush returns nil, false when it
+// returns ErrFlushTimeout. The other steps' values are unchanged.
+func TestHarness_FlushStepReportsWhetherItDrained(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"samplingRate":1}`))
+	}))
+	defer ok.Close()
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer hung.Close()
+	defer close(release)
+
+	const track = `{"action":"track","eventName":"e","eventProperties":{}}`
+	for _, tc := range []struct {
+		name, endpoint, steps string
+		want                  []interface{}
+	}{
+		{"nothing pending", ok.URL, `[{"action":"flush"}]`, []interface{}{true}},
+		{"sent", ok.URL, `[` + track + `,{"action":"flush"}]`, []interface{}{nil, true}},
+		{"timed out", hung.URL, `[` + track + `,{"action":"flush","timeoutMs":50},{"action":"destroy"}]`, []interface{}{nil, false, nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AVO_INSPECTOR_MOCK_ENDPOINT", tc.endpoint+"/inspector/v2/track")
+			envelope := `{"suite":"batching","fixture_id":"t","operation":"sequence",` +
+				`"constructor":{"apiKey":"k","env":"staging","version":"1"},"steps":` + tc.steps + "}\n"
+			var stdout bytes.Buffer
+			if code := run(strings.NewReader(envelope), &stdout); code != 0 {
+				t.Fatalf("exit code %d: %s", code, stdout.String())
+			}
+			var output struct {
+				Actual []struct {
+					Action string      `json:"action"`
+					Value  interface{} `json:"value"`
+				} `json:"actual"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatal(err)
+			}
+			var got []interface{}
+			for _, record := range output.Actual {
+				if record.Action == "track" {
+					got = append(got, nil) // a track step's value is its schema
+					continue
+				}
+				got = append(got, record.Value)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("step values %v, want %v: %s", got, tc.want, stdout.String())
+			}
+		})
 	}
 }
