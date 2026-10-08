@@ -37,7 +37,7 @@ Delivery and robustness:
 - **Redirects are not followed.** A 3xx counts as a non-200 response, so the `api-key` header is never forwarded to another host.
 - **The API key is validated** in the constructor and again before each send: it must not be empty or whitespace, must be valid UTF-8, and must not contain a control character other than tab. A key with a carriage return, line feed or NUL gets the spec's message; any other control character or invalid UTF-8 gets `[Avo Inspector] apiKey must not contain control characters`, as in the Node SDK. A refused send is dropped; the key is never rewritten.
 - **Unknown environments fall back to `Dev`** with a warning (in v1.0.0 only an empty env did). The missing-version error message now reads "Many features of Inspector rely on versioning".
-- **The sampling rate changes only on a 200 that carries a numeric `samplingRate` in [0, 1].** A `{"success":false}` response no longer sets it to 0 and drops every later event, and the rate is read and written under a lock. Sampling is decided per event, before it is queued.
+- **The sampling rate changes only on a 200 that carries a numeric `samplingRate` in [0, 1].** A 200 whose body is cut off counts as delivered and leaves the rate unchanged. A `{"success":false}` response no longer sets it to 0 and drops every later event, and the rate is read and written under a lock. Sampling is decided per event, before it is queued.
 
 Logging:
 

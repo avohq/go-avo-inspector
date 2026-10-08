@@ -210,6 +210,41 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 	}
 }
 
+// A 200 whose body is cut off (the connection closes before Content-Length bytes arrive) is
+// delivered: the status decides. Its body is not read for a samplingRate, even when the bytes
+// that did arrive parse, so the rate is unchanged.
+func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
+	for _, partial := range []string{`{"samplingRa`, `{"samplingRate":0}`, ``} {
+		t.Run(partial, func(t *testing.T) {
+			newTestServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				conn, buffered, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer conn.Close()
+				_, _ = buffered.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n" + partial)
+				_ = buffered.Flush()
+			})
+			inspector := mustInspector(t, Options{Env: Dev})
+			inspector.setSamplingRate(0.5)
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, TrackOptions{})
+			inspector.mu.Lock()
+			inspector.pending = []wireEvent{event}
+			batch, startSender, dropped := inspector.takeBatch()
+			inspector.mu.Unlock()
+			inspector.launch(batch, startSender, dropped)
+			res := <-batch.result
+			inspector.mu.Lock()
+			rate := inspector.samplingRate
+			inspector.mu.Unlock()
+			if res.status != sendOk || rate != 0.5 {
+				t.Errorf("expected a delivered send and samplingRate 0.5, got status %v (%v) and %v", res.status, res.err, rate)
+			}
+		})
+	}
+}
+
 func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 	server := newTestServer(t, respondWith(200, `{"samplingRate":1}`))
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
