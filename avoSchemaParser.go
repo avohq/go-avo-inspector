@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -470,16 +471,27 @@ func (p *schemaParser) mapObject(entries []KeyValue, depth int) []Property {
 
 // mapList is the SPEC.md §9.2 mapping function applied to each element of a list: an object maps
 // to its []Property, a list to its deduplicated element schemas, and a scalar to its type string.
-// Type strings are deduplicated as they are mapped, keeping the first occurrence. An element that
-// is an object or a list is never a duplicate: each keeps its own entry, as in the reference
-// parser, which compares those by identity (SPEC.md §9.3.3).
+// Each distinct element schema is kept once, in first-occurrence order, by deep value equality:
+// two objects are equal when they have the same properties, in any order, with equal types and
+// children; two lists when their children are equal in order. Deduplication is by a canonical key
+// (see writeDedupKey) in a hash set, so it is linear in the size of the children. It applies only
+// to the output: every element is still mapped and counted toward the limits.
 func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} {
 	mapped := []interface{}{}
 	seen := map[string]bool{}
+	// A type string is its own key; the canonical key of a nested schema starts with '['.
 	addType := func(typeName string) {
 		if !seen[typeName] {
 			seen[typeName] = true
 			mapped = append(mapped, typeName)
+		}
+	}
+	var key []byte
+	addSchema := func(child interface{}) {
+		key = appendDedupKey(key[:0], child)
+		if !seen[string(key)] {
+			seen[string(key)] = true
+			mapped = append(mapped, child)
 		}
 	}
 	for _, element := range elements {
@@ -489,14 +501,68 @@ func (p *schemaParser) mapList(elements []interface{}, depth int) []interface{} 
 		case leaf:
 			addType("object")
 		case kind == kindObject:
-			mapped = append(mapped, p.enterObject(element, id, depth+1))
+			addSchema(p.enterObject(element, id, depth+1))
 		case kind == kindList:
-			mapped = append(mapped, p.enterList(element, id, depth+1))
+			addSchema(p.enterList(element, id, depth+1))
 		default:
 			addType(basicTypeName(kind))
 		}
 	}
 	return mapped
+}
+
+// appendDedupKey appends the canonical key of a list child to key: a type string as a quoted
+// string, an object's properties sorted by name as [{"name":"type"[:children]},...], and a list's
+// children in order as [a,b]. An empty object and an empty list are both [], as in the wire JSON.
+func appendDedupKey(key []byte, child interface{}) []byte {
+	switch c := child.(type) {
+	case string:
+		key = strconv.AppendQuote(key, c)
+	case []Property:
+		key = append(key, '[')
+		for i, property := range sortedByName(c) {
+			if i > 0 {
+				key = append(key, ',')
+			}
+			key = append(key, '{')
+			key = strconv.AppendQuote(key, property.PropertyName)
+			key = append(key, ':')
+			key = strconv.AppendQuote(key, property.PropertyType)
+			switch {
+			case property.PropertyType == "object":
+				key = append(key, ':')
+				key = appendDedupKey(key, property.Children)
+			case strings.HasPrefix(property.PropertyType, "list("):
+				key = append(key, ':')
+				key = appendDedupKey(key, property.ListChildren)
+			}
+			key = append(key, '}')
+		}
+		key = append(key, ']')
+	case []interface{}:
+		key = append(key, '[')
+		for i, item := range c {
+			if i > 0 {
+				key = append(key, ',')
+			}
+			key = appendDedupKey(key, item)
+		}
+		key = append(key, ']')
+	}
+	return key
+}
+
+// sortedByName returns properties sorted by name: properties itself when it already is, as it is
+// for a map, otherwise a sorted copy.
+func sortedByName(properties []Property) []Property {
+	for i := 1; i < len(properties); i++ {
+		if properties[i].PropertyName < properties[i-1].PropertyName {
+			sorted := append([]Property(nil), properties...)
+			sort.SliceStable(sorted, func(a, b int) bool { return sorted[a].PropertyName < sorted[b].PropertyName })
+			return sorted
+		}
+	}
+	return properties
 }
 
 // identity returns what identifies a map, slice or OrderedMap for cycle detection. It returns the

@@ -133,31 +133,66 @@ func TestExtractSchema_TypedGoValues(t *testing.T) {
 			`{"propertyName":"complex","propertyType":"unknown"},`+
 			`{"propertyName":"funcs","propertyType":"list(object)","children":["unknown"]},`+
 			`{"propertyName":"nullFirst","propertyType":"list(string)","children":["null","int"]},`+
-			`{"propertyName":"nestedList","propertyType":"list(object)","children":[["int"],["int"]]}]`)
+			`{"propertyName":"nestedList","propertyType":"list(object)","children":[["int"]]}]`)
 }
 
-// List children keep one entry per object or list element, even when two are identical; only type
-// strings are deduplicated. The expected values are the reference Node parser's output for the
-// same inputs (SPEC.md §9.3.3).
-func TestExtractSchema_DedupMatchesReferenceParser(t *testing.T) {
+// List children hold each distinct element schema once, in first-occurrence order, by deep value
+// equality: objects with the same properties in any order, with equal types and children, and
+// lists with equal children in order. The first occurrence is kept with its own property order.
+func TestExtractSchema_ListChildrenAreDeduplicatedByValue(t *testing.T) {
 	testCases := []struct {
 		name     string
 		input    OrderedMap
 		expected string
 	}{
 		{"nested lists", om{{"v", list{list{1}, list{2}}}},
-			`[{"propertyName":"v","propertyType":"list(object)","children":[["int"],["int"]]}]`},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[["int"]]}]`},
 		{"identical objects", om{{"v", list{om{{"a", 1}}, om{{"a", 1}}}}},
-			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"}],[{"propertyName":"a","propertyType":"int"}]]}]`},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"}]]}]`},
 		{"mixed", om{{"v", list{list{"x"}, list{"x"}, "s", "s", 1, om{{"b", true}}, om{{"b", true}}}}},
-			`[{"propertyName":"v","propertyType":"list(object)","children":[["string"],["string"],"string","int",[{"propertyName":"b","propertyType":"boolean"}],[{"propertyName":"b","propertyType":"boolean"}]]}]`},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[["string"],"string","int",[{"propertyName":"b","propertyType":"boolean"}]]}]`},
 		{"deep", om{{"v", list{list{list{1, 1}, list{1}}, list{list{1}}}}},
-			`[{"propertyName":"v","propertyType":"list(object)","children":[[["int"],["int"]],[["int"]]]}]`},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[["int"]]]}]`},
+		{"property order is ignored, the first occurrence is kept", om{{"v", list{om{{"b", "x"}, {"a", 1}}, om{{"a", 2}, {"b", "y"}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"b","propertyType":"string"},{"propertyName":"a","propertyType":"int"}]]}]`},
+		{"list children are compared in order", om{{"v", list{list{1, "s"}, list{"s", 1}, list{1, "s"}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[["int","string"],["string","int"]]}]`},
+		{"different types or children differ", om{{"v", list{om{{"a", 1}}, om{{"a", "1"}}, om{{"a", om{{"x", 1}}}}, om{{"a", om{{"x", 1.5}}}}, om{{"a", om{{"x", 1}}}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"}],[{"propertyName":"a","propertyType":"string"}],[{"propertyName":"a","propertyType":"object","children":[{"propertyName":"x","propertyType":"int"}]}],[{"propertyName":"a","propertyType":"object","children":[{"propertyName":"x","propertyType":"float"}]}]]}]`},
+		{"a subset of properties differs", om{{"v", list{om{{"a", 1}, {"b", 1}}, om{{"a", 1}}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[{"propertyName":"a","propertyType":"int"},{"propertyName":"b","propertyType":"int"}],[{"propertyName":"a","propertyType":"int"}]]}]`},
+		{"an empty object and an empty list are the same schema", om{{"v", list{om{}, list{}}}},
+			`[{"propertyName":"v","propertyType":"list(object)","children":[[]]}]`},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertSchemaJSON(t, extractSchema(tc.input), tc.expected)
 		})
+	}
+}
+
+// Deduplication hashes a canonical key instead of comparing children pairwise: 9,999 distinct
+// objects (just under both budgets) and 9,999 identical ones are mapped quickly.
+func TestExtractSchema_ListDedupIsLinear(t *testing.T) {
+	const n = 9999
+	distinct := make(list, n)
+	identical := make(list, n)
+	for i := range distinct {
+		distinct[i] = om{{"k" + strconv.Itoa(i), 1}}
+		identical[i] = om{{"k", 1}}
+	}
+	for _, tc := range []struct {
+		name     string
+		elements list
+		want     int
+	}{{"distinct", distinct, n}, {"identical", identical, 1}} {
+		start := time.Now()
+		children := (&schemaParser{}).mapList(tc.elements, 1)
+		elapsed := time.Since(start)
+		t.Logf("%s: %v", tc.name, elapsed)
+		if elapsed > time.Second || len(children) != tc.want {
+			t.Errorf("%s: %d children in %v, want %d in under a second", tc.name, len(children), elapsed, tc.want)
+		}
 	}
 }
 
@@ -462,7 +497,7 @@ func TestExtractSchema_ExpansionBudgetBoundary(t *testing.T) {
 	objects := func(n int) list {
 		items := make(list, n)
 		for i := range items {
-			items[i] = om{{"i", i}}
+			items[i] = om{{"i" + strconv.Itoa(i), i}}
 		}
 		return items
 	}
@@ -479,6 +514,18 @@ func TestExtractSchema_ExpansionBudgetBoundary(t *testing.T) {
 	}
 	if len(children) != 9999 || children[9997] == "object" || children[9998] != "object" {
 		t.Errorf("expected 9998 expanded objects then \"object\", got %d children", len(children))
+	}
+	// Identical objects are deduplicated in the output only: they count toward the budget the same.
+	identical := make(list, 10000)
+	for i := range identical {
+		identical[i] = om{{"i", i}}
+	}
+	parser := &schemaParser{}
+	value := om{{"items", identical}}
+	schema := parser.enterObject(value, identity(value), 0)
+	if parser.expansions != 10000 || parser.properties != 9999 || len(schema[0].ListChildren) != 2 {
+		t.Errorf("identical objects: %d expansions, %d properties and %d children, want 10000, 9999 and 2",
+			parser.expansions, parser.properties, len(schema[0].ListChildren))
 	}
 	// Scalars never count toward the budget.
 	scalars := make(list, 20000)
@@ -501,7 +548,7 @@ func TestExtractSchema_BudgetMatchesNode(t *testing.T) {
 		input  OrderedMap
 		sha256 string
 	}{
-		{"10,000 objects", om{{"items", objects}}, "128e49642937e1ca0cc40e5f3c09268a5cde25f3d8f449735176e16f900e2597"},
+		{"10,000 objects", om{{"items", objects}}, "adce9de0b9f31b6aecdc7352d0ceaad89ab0ce669e6c5214855fdf3b21e9011a"},
 	} {
 		encoded, err := json.Marshal(extractSchema(tc.input))
 		if err != nil {
@@ -780,6 +827,23 @@ func canonical(value interface{}, out *strings.Builder) {
 	}
 }
 
+// assertCanonicalDigest checks the SHA-256 and length of a schema's canonical form against the
+// reference SDKs' output for the same input.
+func assertCanonicalDigest(t *testing.T, schema []Property, length int, sha string) {
+	t.Helper()
+	encoded, _ := json.Marshal(schema)
+	var wire interface{}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	canonical(wire, &out)
+	digest := sha256.Sum256([]byte(out.String()))
+	if got := hex.EncodeToString(digest[:]); got != sha || out.Len() != length {
+		t.Errorf("differs from the reference SDKs: sha256 %s, length %d, %d entries", got, out.Len(), strings.Count(out.String(), "{"))
+	}
+}
+
 // flatOrdered is key0..key(n-1) = int, in insertion order.
 func flatOrdered(n int) OrderedMap {
 	m := make(OrderedMap, 0, n)
@@ -819,21 +883,11 @@ func TestExtractSchema_PropertyBudgetMatchesReferenceSDKs(t *testing.T) {
 	}{
 		{"flat 1M keys", flatOrdered(1000000), 138891, "9652d270cd6568d00b73032b56b73782771f634703c89f7fa81df852ae50c835"},
 		{"nested a..e of 5,000", nested, 137779, "73549e68066367f3e976a97b299df3bb972e80fe65b487f89b7d7f251397984d"},
-		{"items of 3 maps of 4,000, then after", items, 136686, "1f5e38d0b71cdb231568521f0f1ceffc768cd7fcae5e08ab555fc64b8227601f"},
+		{"items of 3 maps of 4,000, then after", items, 81794, "a36b0433669c560d85d2f289e194ab6cc4eaa6f32ab13c5acdcac56703bf5b3c"},
 		{"mapsDag(4,12)", mapsDag(4, 12), 147496, "5012bc5b9543195e969f2b10956402ef0306e92a009f409194dffd8bd46083ed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			encoded, _ := json.Marshal(extractSchema(tc.input))
-			var wire interface{}
-			if err := json.Unmarshal(encoded, &wire); err != nil {
-				t.Fatal(err)
-			}
-			var out strings.Builder
-			canonical(wire, &out)
-			digest := sha256.Sum256([]byte(out.String()))
-			if got := hex.EncodeToString(digest[:]); got != tc.sha256 || out.Len() != tc.length {
-				t.Errorf("differs from the reference SDKs: sha256 %s, length %d, %d entries", got, out.Len(), strings.Count(out.String(), "{"))
-			}
+			assertCanonicalDigest(t, extractSchema(tc.input), tc.length, tc.sha256)
 		})
 	}
 }
