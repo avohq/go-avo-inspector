@@ -2,13 +2,21 @@
 
 ## 2.0.0
 
-Implements [avohq/spec-first-inspector-server-sdk](https://github.com/avohq/spec-first-inspector-server-sdk) v3.0.1: the `/inspector/v2/track` endpoint with the `api-key`, `env` and `X-Avo-Client` headers, gzip for bodies of 1024 bytes or more, batching with `Flush` and `Destroy`, stream ids and gateway options (`GatewayOptions`). This is a breaking release: the module path is now `github.com/avohq/go-avo-inspector/v2`; see [Upgrading from v1 to v2](README.md#upgrading-from-v1-to-v2) in the README. Every v1.0.0 function and method keeps its signature, and every v1.0.0 type still exists.
+Implements [avohq/spec-first-inspector-server-sdk](https://github.com/avohq/spec-first-inspector-server-sdk) v3.0.1: the `/inspector/v2/track` endpoint with the `api-key`, `env` and `X-Avo-Client` headers, gzip for bodies of 1024 bytes or more, batching with `Flush` and `Destroy`, stream ids and gateway fields. See [Upgrading from v1 to v2](README.md#upgrading-from-v1-to-v2) in the README.
+
+Breaking changes:
+
+- **`TrackSchemaFromEvent(event InspectorEvent)` is the only tracking call.** `InspectorEvent` carries `EventName`, `EventProperties` (or `OrderedEventProperties`, an `OrderedMap` whose order the schema keeps), `StreamId`, `OutputReference`, `OriginHint` and `OriginAppVersion`; every field is optional. It replaces v1's `TrackSchemaFromEvent(eventName, properties)`: write `TrackSchemaFromEvent(avoinspector.InspectorEvent{EventName: eventName, EventProperties: properties})`. The wire output for the same values is unchanged.
+- **The module path is now `github.com/avohq/go-avo-inspector/v2`.**
+- **`Property` gained `ListChildren`** (see below), so a positional `Property` literal with three values no longer compiles.
+
+The constructors, `Flush`, `ShouldLog` and the other v1.0.0 methods keep their signatures, and every v1.0.0 type still exists.
 
 New API:
 
 - **`Options` and `NewAvoInspectorWithOptions(Options)`**, for the batching options (`BatchSize`, `BatchFlushSeconds`, `MaxQueueSize`, `DisableBatchTimer`). A zero value means the default; a negative one prints a warning and uses the default. `NewAvoInspector` is unchanged.
-- **`TrackSchemaFromEventWithOptions(eventName, properties, streamId, *GatewayOptions)`**, where `GatewayOptions` carries `OutputReference`, `OriginHint` and `OriginAppVersion`. An empty `streamId` means none, and a nil `*GatewayOptions` means no gateway values. `TrackSchemaFromEvent` is the same call with neither.
-- **`OrderedMap` and `KeyValue`**, to keep property order, with `TrackOrderedSchemaFromEvent` and `ExtractOrderedSchema`. A pointer to an `OrderedMap`, a named type based on it, and a bare `[]KeyValue` are read the same way, at the top level or nested.
+- **`InspectorEvent`**, the argument of `TrackSchemaFromEvent` (see Breaking changes). When both `EventProperties` and `OrderedEventProperties` are set, `OrderedEventProperties` is used and an always-on, rate-limited warning says so.
+- **`OrderedMap` and `KeyValue`**, to keep property order, with `InspectorEvent.OrderedEventProperties` and `ExtractOrderedSchema`. A pointer to an `OrderedMap`, a named type based on it, and a bare `[]KeyValue` are read the same way, at the top level or nested.
 - **`ExtractSchema`** returns the schema without sending anything.
 - **`Flush(timeout)` and `Destroy()`.** `Flush` sends pending events and waits for in-flight sends. It returns `nil` only when, as it returns, nothing is buffered, waiting or in flight, and `ErrFlushTimeout` otherwise; the error is informational. `Flush(0)` starts the sends without waiting, so it returns `nil` only when nothing was pending; a negative timeout means `DefaultFlushTimeout` (10 seconds).
 - **`EnableLogging`**, process-wide. `ShouldLog` still works and is deprecated in favour of it.

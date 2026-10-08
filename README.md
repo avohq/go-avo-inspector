@@ -129,7 +129,10 @@ those retries, then give up and log:
 
 ```go
 for _, row := range rows {
-	if _, err := avoInspector.TrackSchemaFromEvent(row.Event, row.Properties); err != nil {
+	if _, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+		EventName:       row.Event,
+		EventProperties: row.Properties,
+	}); err != nil {
 		log.Print("Avo Inspector track: ", err)
 	}
 }
@@ -189,7 +192,7 @@ not logged.
 
 ## Sending event schemas
 
-Whenever you send a tracking event, also call the following method:
+Whenever you send a tracking event, also call `TrackSchemaFromEvent` with an `InspectorEvent`:
 
 Read more in the [Avo documentation](https://www.avo.app/docs/implementation/devs-101#inspecting-events)
 
@@ -197,26 +200,35 @@ This method gets actual tracking event parameters, extracts schema automatically
 It is the easiest way to use the library, just call this method at the same place you call your analytics tools' track methods with the same parameters.
 
 ```go
-result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interface{}{
-	"str":  "hello",
-	"int":  42,
-	"flt":  3.14,
-	"bol":  true,
-	"nul":  nil,
-	"lst":  []interface{}{"foo", "bar", nil, map[string]interface{}{"d": 42}},
-	"obj":  map[string]interface{}{"a": 1, "b": "two", "c": []interface{}{true, 3.14}},
-	"unk":  complex(1, 2),
-	"func": func() {},
+result, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+	EventName: "Test Event",
+	EventProperties: map[string]interface{}{
+		"str":  "hello",
+		"int":  42,
+		"flt":  3.14,
+		"bol":  true,
+		"nul":  nil,
+		"lst":  []interface{}{"foo", "bar", nil, map[string]interface{}{"d": 42}},
+		"obj":  map[string]interface{}{"a": 1, "b": "two", "c": []interface{}{true, 3.14}},
+		"unk":  complex(1, 2),
+		"func": func() {},
+	},
 })
+if err != nil {
+	log.Print("Avo Inspector track: ", err)
+}
 ```
 
-To report events that pass through an Avo gateway, call `TrackSchemaFromEventWithOptions` with a
-stream id and the gateway fields in a `GatewayOptions`. With a gateway-scoped API key, always pass `OriginHint` and
+To report events that pass through an Avo gateway, set the gateway fields on the same
+`InspectorEvent`. With a gateway-scoped API key, always pass `OriginHint` and
 `OriginAppVersion`. Pass `OutputReference` when the payload was bound for a specific output; leave
 it out for an observation at the gateway checkpoint.
 
 ```go
-if _, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, "stream-123", &avoinspector.GatewayOptions{
+if _, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+	EventName:        "Purchase",
+	EventProperties:  properties,
+	StreamId:         "stream-123", // correlation id, sent verbatim
 	OutputReference:  "meta-x7k2q", // the gateway output this observation was bound for
 	OriginHint:       "android",    // the source the event came from
 	OriginAppVersion: "4.2.0",      // that source's app version
@@ -239,10 +251,9 @@ the process exits (see [Shutdown](#shutdown)).
 
 ### Stream id and gateway options
 
-`TrackSchemaFromEventWithOptions` and `TrackOrderedSchemaFromEvent` take a stream id and a
-`*GatewayOptions` after the properties (see the example under
-[Sending event schemas](#sending-event-schemas)). The stream id is a correlation id, sent verbatim;
-`""` means none. A nil `*GatewayOptions` means no gateway values, the same as `&GatewayOptions{}`.
+`StreamId` and the gateway fields are fields of `InspectorEvent` (see the example under
+[Sending event schemas](#sending-event-schemas)). `StreamId` is a correlation id, sent verbatim;
+`""` means none.
 
 Every gateway field can be left empty; blank values are left out of the event; with a gateway-scoped API key, pass the ones described under
 [Sending event schemas](#sending-event-schemas). An empty `OutputReference` means the observation
@@ -253,15 +264,22 @@ version for that event, whether or not `OriginHint` is set. When `OriginHint` is
 
 ### Property order
 
-Go maps have no order, so a schema extracted from a `map[string]interface{}` lists properties sorted
-by key. To keep a specific order, pass an `OrderedMap`, at the top level or as any nested value:
+Go maps have no order, so a schema extracted from `EventProperties` lists properties sorted by key.
+To keep a specific order, set `OrderedEventProperties` to an `OrderedMap` instead; an `OrderedMap`
+also keeps its order as any nested value:
 
 ```go
-result, err := avoInspector.TrackOrderedSchemaFromEvent("Signup", avoinspector.OrderedMap{
-	{Key: "plan", Value: "pro"},
-	{Key: "seats", Value: 3},
-}, "", nil)
+result, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+	EventName: "Signup",
+	OrderedEventProperties: avoinspector.OrderedMap{
+		{Key: "plan", Value: "pro"},
+		{Key: "seats", Value: 3},
+	},
+})
 ```
+
+Set one of the two. When `OrderedEventProperties` is non-nil it is used and `EventProperties` is
+ignored; setting both logs a warning.
 
 `ExtractSchema` and `ExtractOrderedSchema` return the schema without sending anything.
 
@@ -330,10 +348,24 @@ or timer, so one you stop using after a `Flush` is garbage-collected even withou
   `github.com/avohq/go-avo-inspector/v2`. Run `go get github.com/avohq/go-avo-inspector/v2` and
   change your imports to that path. The package name is still `avoinspector`.
 
-Apart from the import path, every v1.0.0 function and method keeps its signature, and every v1.0.0
-type still exists. One type gained a field: `Property` adds `ListChildren`, so a positional
-`Property` literal with three values no longer compiles. Use field names in the literal, or add the
-fourth value.
+- **`TrackSchemaFromEvent` takes one `InspectorEvent`.** The event name and properties, and the
+  stream id and gateway fields that are new in v2, are fields of one struct:
+
+  ```go
+  // v1
+  schema, err := avoInspector.TrackSchemaFromEvent("Signed Up", properties)
+
+  // v2
+  schema, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+  	EventName:       "Signed Up",
+  	EventProperties: properties,
+  })
+  ```
+
+  It is the only tracking call. The constructors, `Flush` and the other v1.0.0 methods keep their
+  signatures, and every v1.0.0 type still exists.
+- **`Property` gained a field.** `Property` adds `ListChildren`, so a positional `Property` literal
+  with three values no longer compiles. Use field names in the literal, or add the fourth value.
 
 These are the behaviour changes you may notice:
 
