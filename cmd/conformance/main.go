@@ -141,9 +141,10 @@ var (
 
 // parseRequest checks the envelope against the runner contract (input envelope). A required field
 // must be present with its type and an optional one has its type when present; null is accepted
-// only for an extractSchema input. Inside the constructor, a track input, its options and a step,
-// a key the harness would ignore is an error. Top-level keys the harness does not read
-// (expected_*, mock_response, description, ...) belong to the suite runner.
+// only for an extractSchema input. A key the harness does not read is ignored, at the top level
+// (expected_*, mock_response, description, ...), in the constructor, a track input, its options
+// and a step, so a fixture written for a later contract still runs. Only an unknown precondition
+// field is an error, because the contract requires every precondition to be applied.
 func parseRequest(envelope avoinspector.OrderedMap) (request, error) {
 	var req request
 	suite, err := requireString(envelope, "", "suite")
@@ -212,10 +213,6 @@ func parseRequest(envelope avoinspector.OrderedMap) (request, error) {
 // range is the SDK's to check.
 func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Options, error) {
 	options := avoinspector.Options{}
-	if err := checkKeys(constructor, "constructor.", "apiKey", "env", "version", "appName",
-		"batchSize", "batchFlushSeconds", "maxQueueSize", "disableBatchTimer"); err != nil {
-		return options, err
-	}
 	var err error
 	if options.ApiKey, err = requireString(constructor, "constructor.", "apiKey"); err != nil {
 		return options, err
@@ -276,11 +273,8 @@ func precondition(envelope avoinspector.OrderedMap) (*float64, error) {
 // parseTrack checks a track input or a track step: eventName is a required string,
 // eventProperties a required object, streamId an optional string, and options an optional object
 // of optional strings, passed through verbatim (normalizing them is the SDK's job).
-func parseTrack(object avoinspector.OrderedMap, where string, extraKeys ...string) (trackCall, error) {
+func parseTrack(object avoinspector.OrderedMap, where string) (trackCall, error) {
 	var call trackCall
-	if err := checkKeys(object, where, append([]string{"eventName", "eventProperties", "streamId", "options"}, extraKeys...)...); err != nil {
-		return call, err
-	}
 	var err error
 	if call.eventName, err = requireString(object, where, "eventName"); err != nil {
 		return call, err
@@ -299,9 +293,6 @@ func parseTrack(object avoinspector.OrderedMap, where string, extraKeys ...strin
 		return call, err
 	}
 	where += "options."
-	if err := checkKeys(options, where, "outputReference", "originHint", "originAppVersion"); err != nil {
-		return call, err
-	}
 	if call.options.OutputReference, _, err = optionalString(options, where, "outputReference"); err != nil {
 		return call, err
 	}
@@ -333,13 +324,10 @@ func parseSteps(envelope avoinspector.OrderedMap) ([]step, error) {
 		s := step{action: action, timeout: avoinspector.DefaultFlushTimeout}
 		switch action {
 		case "track":
-			s.track, err = parseTrack(object, where, "action")
+			s.track, err = parseTrack(object, where)
 		case "trackN":
 			s, err = parseTrackN(object, where, s)
 		case "flush":
-			if err = checkKeys(object, where, "action", "timeoutMs"); err != nil {
-				break
-			}
 			ms, present, numErr := optionalNumber(object, where, "timeoutMs")
 			switch {
 			case numErr != nil:
@@ -350,7 +338,6 @@ func parseSteps(envelope avoinspector.OrderedMap) ([]step, error) {
 				s.timeout = time.Duration(ms * float64(time.Millisecond))
 			}
 		case "destroy":
-			err = checkKeys(object, where, "action")
 		default:
 			err = configError{"unsupported sequence action: " + action}
 		}
@@ -365,9 +352,6 @@ func parseSteps(envelope avoinspector.OrderedMap) ([]step, error) {
 // parseTrackN checks a trackN step: count is a required integer >= 1, eventNamePrefix a required
 // string and streamId an optional string.
 func parseTrackN(object avoinspector.OrderedMap, where string, s step) (step, error) {
-	if err := checkKeys(object, where, "action", "count", "eventNamePrefix", "streamId"); err != nil {
-		return s, err
-	}
 	count, present, err := optionalInt(object, where, "count")
 	if err != nil || !present || count < 1 {
 		return s, configError{where + "count must be an integer >= 1"}

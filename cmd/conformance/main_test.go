@@ -39,11 +39,10 @@ func TestHarness_ExitsOneWhenTheEnvelopeWriteFails(t *testing.T) {
 
 // Every field of the input envelope is checked against the runner contract before the SDK is
 // constructed: a required field must be present with its type, an optional one has its type when
-// present, null is accepted only where the contract allows it (an extractSchema input), and a key
-// the harness would silently ignore inside the constructor, a track input, its options or a step
-// is rejected. Any malformed envelope exits 2. A well-formed envelope whose values the SDK rejects
-// (a blank apiKey) exits 1, and a valid one exits 0. Top-level keys the harness does not read
-// (expected_*, mock_response, description) belong to the suite runner and are ignored.
+// present, and null is accepted only where the contract allows it (an extractSchema input). Any
+// malformed envelope exits 2. A well-formed envelope whose values the SDK rejects (a blank apiKey)
+// exits 1, and a valid one exits 0. Keys the harness does not read are ignored wherever they are
+// (see TestHarness_IgnoresUnknownFields).
 func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 	// Valid track cases send from a dev instance: keep them off the real API.
 	t.Setenv("AVO_INSPECTOR_MOCK_ENDPOINT", "http://127.0.0.1:1/inspector/v2/track")
@@ -114,7 +113,6 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"appName not a string", extract(ctorWith(`"appName":3`), `{}`), 2},
 		{"appName null", extract(ctorWith(`"appName":null`), `{}`), 2},
 		{"appName", extract(ctorWith(`"appName":"a"`), `{}`), 0},
-		{"unknown constructor key", extract(ctorWith(`"other":1`), `{}`), 2},
 		{"batchSize fractional", extract(ctorWith(`"batchSize":2.5`), `{}`), 2},
 		{"batchSize out of range", extract(ctorWith(`"batchSize":1e30`), `{}`), 2},
 		{"batchSize integer literal beyond int64", extract(ctorWith(`"batchSize":99999999999999999999`), `{}`), 2},
@@ -168,7 +166,6 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"eventProperties null", track(`{"eventName":"e","eventProperties":null}`), 2},
 		{"eventProperties array", track(`{"eventName":"e","eventProperties":[]}`), 2},
 		{"eventProperties string", track(`{"eventName":"e","eventProperties":"x"}`), 2},
-		{"unknown track input key", trackWith(`"other":1`), 2},
 		{"streamId not a string", trackWith(`"streamId":3`), 2},
 		{"streamId null", trackWith(`"streamId":null`), 2},
 		{"streamId", trackWith(`"streamId":"s"`), 0},
@@ -176,7 +173,6 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"options not an object", trackWith(`"options":[]`), 2},
 		{"option value not a string", trackWith(`"options":{"originHint":3}`), 2},
 		{"option value null", trackWith(`"options":{"originAppVersion":null}`), 2},
-		{"unknown option", trackWith(`"options":{"other":"x"}`), 2},
 		{"options", trackWith(`"options":{"outputReference":" o ","originHint":"web","originAppVersion":""}`), 0},
 		{"empty options", trackWith(`"options":{}`), 0},
 		{"track", trackWith(`"streamId":"s","options":{"originHint":"web"}`), 0},
@@ -192,7 +188,6 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"track step eventName missing", sequence(`[{"action":"track","eventProperties":{}}]`), 2},
 		{"track step eventProperties null", sequence(`[{"action":"track","eventName":"e","eventProperties":null}]`), 2},
 		{"track step option not a string", sequence(`[{"action":"track","eventName":"e","eventProperties":{},"options":{"originHint":3}}]`), 2},
-		{"track step unknown key", sequence(`[{"action":"track","eventName":"e","eventProperties":{},"other":1}]`), 2},
 		{"track step", sequence(`[` + validTrack + `]`), 0},
 		{"a malformed later step exits 2 before any step runs", sequence(`[` + validTrack + `,{"action":"flush","timeoutMs":-1}]`), 2},
 		{"trackN count missing", sequence(`[{"action":"trackN","eventNamePrefix":"E"}]`), 2},
@@ -204,7 +199,6 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"trackN eventNamePrefix missing", sequence(`[{"action":"trackN","count":2}]`), 2},
 		{"trackN eventNamePrefix not a string", sequence(`[{"action":"trackN","count":2,"eventNamePrefix":3}]`), 2},
 		{"trackN streamId not a string", sequence(`[{"action":"trackN","count":2,"eventNamePrefix":"E","streamId":3}]`), 2},
-		{"trackN unknown key", sequence(`[{"action":"trackN","count":2,"eventNamePrefix":"E","other":1}]`), 2},
 		{"trackN", sequence(`[{"action":"trackN","count":2,"eventNamePrefix":"E","streamId":"s"}]`), 0},
 		{"flush timeoutMs negative", sequence(`[{"action":"flush","timeoutMs":-1}]`), 2},
 		{"flush timeoutMs beyond time.Duration", sequence(`[{"action":"flush","timeoutMs":1e13}]`), 2},
@@ -212,13 +206,42 @@ func TestHarness_ValidatesTheInputEnvelope(t *testing.T) {
 		{"flush timeoutMs integer literal beyond int64", sequence(`[{"action":"flush","timeoutMs":99999999999999999999}]`), 2},
 		{"flush timeoutMs not a number", sequence(`[{"action":"flush","timeoutMs":"5"}]`), 2},
 		{"flush timeoutMs null", sequence(`[{"action":"flush","timeoutMs":null}]`), 2},
-		{"flush unknown key", sequence(`[{"action":"flush","other":1}]`), 2},
 		{"flush", sequence(`[{"action":"flush"}]`), 0},
 		{"flush timeoutMs 0", sequence(`[{"action":"flush","timeoutMs":0}]`), 0},
 		{"flush timeoutMs", sequence(`[{"action":"flush","timeoutMs":5}]`), 0},
 		{"flush timeoutMs fractional", sequence(`[{"action":"flush","timeoutMs":2.5}]`), 0},
-		{"destroy unknown key", sequence(`[{"action":"destroy","other":1}]`), 2},
 		{"destroy", sequence(`[{"action":"destroy"}]`), 0},
+	} {
+		var stdout bytes.Buffer
+		if code := run(strings.NewReader(tc.envelope+"\n"), &stdout); code != tc.want {
+			t.Errorf("%s: exit code %d, want %d: %s", tc.name, code, tc.want, strings.TrimSpace(stdout.String()))
+		}
+	}
+}
+
+// Unknown fields are ignored wherever they appear: in the envelope, the constructor, a track input
+// and its options, every kind of step, and mock_response, which belongs to the suite runner. Only
+// an unknown precondition field exits 2, since the contract requires every precondition applied.
+func TestHarness_IgnoresUnknownFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, envelope string
+		want           int
+	}{
+		{"envelope, constructor and mock_response", `{"suite":"schema-extraction","fixture_id":"t","future":{"x":1},` +
+			`"constructor":{"apiKey":"k","env":"dev","version":"1","future":true},"input":{"a":1},` +
+			`"mock_response":{"status":200,"body":{},"future":"x","delayMs":5}}`, 0},
+		{"track input and options", `{"suite":"wire-protocol","fixture_id":"t","operation":"trackSchemaFromEvent",` +
+			`"constructor":{"apiKey":"k","env":"dev","version":"1"},` +
+			`"input":{"eventName":"e","eventProperties":{},"future":1,"options":{"originHint":"web","future":"x"}},` +
+			`"mock_response":{"status":200,"future":[1]}}`, 0},
+		{"every step", `{"suite":"batching","fixture_id":"t","operation":"sequence",` +
+			`"constructor":{"apiKey":"k","env":"staging","version":"1","batchSize":100},"steps":[` +
+			`{"action":"track","eventName":"e","eventProperties":{},"future":1,"options":{"future":"x"}},` +
+			`{"action":"trackN","count":2,"eventNamePrefix":"E","future":1},` +
+			`{"action":"flush","timeoutMs":0,"future":1},` +
+			`{"action":"destroy","future":1}],"mock_response":{"future":true}}`, 0},
+		{"precondition", `{"suite":"schema-extraction","fixture_id":"t",` +
+			`"constructor":{"apiKey":"k","env":"dev","version":"1"},"input":{},"precondition":{"future":1}}`, 2},
 	} {
 		var stdout bytes.Buffer
 		if code := run(strings.NewReader(tc.envelope+"\n"), &stdout); code != tc.want {
