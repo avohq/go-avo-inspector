@@ -891,3 +891,43 @@ func TestExtractSchema_PropertyBudgetMatchesReferenceSDKs(t *testing.T) {
 		})
 	}
 }
+
+// Cross-SDK parity fixture F1: slices and arrays of numbers are typed by their element type and
+// never walked, so an empty one has the same type.
+func TestExtractSchema_ParityTypedArrays(t *testing.T) {
+	schema := extractSchema(om{
+		{"d", []float64{0.5, 1.5}},
+		{"f", []float32{0.5}},
+		{"e", []float64{}},
+		{"b", []byte{1, 2}},
+		{"i", []int32{1, 2}},
+	})
+	assertSchemaJSON(t, schema, `[{"propertyName":"d","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"f","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"e","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"b","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"i","propertyType":"list(int)","children":["int"]}]`)
+	assertCanonicalDigest(t, schema, 123, "bd4dcad1a3f78a8bf7d1ad8a88c878beb77c6c59b6c40abfb7f2706df3433985")
+}
+
+// Cross-SDK parity fixture F2: list children are deduplicated by value. A Go map lists its keys
+// sorted, so the first two maps are both {a:int, b:string}.
+func TestExtractSchema_ParityListDedup(t *testing.T) {
+	schema := extractSchema(om{
+		{"maps", list{
+			map[string]interface{}{"a": 1, "b": "x"},
+			map[string]interface{}{"b": "y", "a": 2},
+			map[string]interface{}{"a": 3},
+		}},
+		{"lists", list{list{1}, list{2}, list{"x"}, list{3}}},
+		{"bins", list{[]byte{1}, []byte{2, 3}, []byte{}}},
+		{"mixed", list{1, "x", 2, "y"}},
+	})
+	assertSchemaJSON(t, schema, `[{"propertyName":"maps","propertyType":"list(object)","children":[`+
+		`[{"propertyName":"a","propertyType":"int"},{"propertyName":"b","propertyType":"string"}],`+
+		`[{"propertyName":"a","propertyType":"int"}]]},`+
+		`{"propertyName":"lists","propertyType":"list(object)","children":[["int"],["string"]]},`+
+		`{"propertyName":"bins","propertyType":"list(object)","children":[["int"]]},`+
+		`{"propertyName":"mixed","propertyType":"list(int)","children":["int","string"]}]`)
+	assertCanonicalDigest(t, schema, 161, "ea480ff92fa33427780e2b46510d84e80589d90fd4bf57baac2f8efa3c866422")
+}
