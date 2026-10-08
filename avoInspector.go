@@ -48,10 +48,10 @@ const (
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
 	apiKeyControlMessage = "[Avo Inspector] API key contains a control character. The API key is sent as a request header and cannot contain CR, LF, or NUL."
-	apiKeyUTF8Message    = "Avo Inspector: apiKey must be valid UTF-8"
 	// apiKeyOtherControlMessage is for control characters other than CR, LF and NUL, which keep
-	// the spec's apiKeyControlMessage.
-	apiKeyOtherControlMessage = "Avo Inspector: apiKey must not contain control characters"
+	// the spec's apiKeyControlMessage, and for a key that is not valid UTF-8. It is the Node SDK's
+	// message.
+	apiKeyOtherControlMessage = "[Avo Inspector] apiKey must not contain control characters"
 	noVersionMessage          = "[Avo Inspector] No version provided. Many features of Inspector rely on versioning. Please provide comparable string version, i.e. integer or semantic."
 	internalErrorMessage      = "Avo Inspector: something went wrong. Please report to support@avo.app."
 	logPrefix                 = "[Avo Inspector] "
@@ -180,7 +180,7 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		return nil, errors.New(noApiKeyMessage)
 	}
 	if !utf8.ValidString(options.ApiKey) {
-		return nil, errors.New(apiKeyUTF8Message)
+		return nil, errors.New(apiKeyOtherControlMessage)
 	}
 	if strings.ContainsAny(options.ApiKey, "\r\n\x00") {
 		return nil, errors.New(apiKeyControlMessage)

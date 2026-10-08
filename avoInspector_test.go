@@ -688,8 +688,8 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\x01", "key\x1bx", "key\x7f", "k\x0bey", "k\x0cey", "key\u0080", "key\u0085", "key\u009f"} {
 		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
-		if err == nil || err.Error() != apiKeyOtherControlMessage || inspector != nil {
-			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyOtherControlMessage, inspector, err)
+		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
+			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
 		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
@@ -743,14 +743,15 @@ func TestDestroy_AbandonedSendIsNotLogged(t *testing.T) {
 	}
 }
 
-// An apiKey that is not valid UTF-8 is rejected at construction and refused at send. Valid
-// multibyte characters, whose continuation bytes fall in 0x80-0xBF, are accepted.
+// An apiKey that is not valid UTF-8 is rejected at construction, with the message for control
+// characters other than CR, LF and NUL, and refused at send. Valid multibyte characters, whose
+// continuation bytes fall in 0x80-0xBF, are accepted.
 func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\x85", "key\xff", "\xc4"} {
 		inspector, err := NewAvoInspectorWithOptions(Options{ApiKey: apiKey, AppVersion: "1.0.0"})
-		if err == nil || err.Error() != apiKeyUTF8Message || inspector != nil {
-			t.Errorf("apiKey %q: expected %q, got (%v, %v)", apiKey, apiKeyUTF8Message, inspector, err)
+		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
+			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
 		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
