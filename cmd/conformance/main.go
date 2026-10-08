@@ -122,7 +122,8 @@ type request struct {
 type trackCall struct {
 	eventName  string
 	properties avoinspector.OrderedMap
-	options    avoinspector.TrackOptions
+	streamID   string
+	gateway    *avoinspector.GatewayOptions // nil when the input has no options
 }
 
 type step struct {
@@ -282,7 +283,7 @@ func parseTrack(object avoinspector.OrderedMap, where string) (trackCall, error)
 	if call.properties, err = requireObject(object, where, "eventProperties"); err != nil {
 		return call, err
 	}
-	if call.options.StreamId, _, err = optionalString(object, where, "streamId"); err != nil {
+	if call.streamID, _, err = optionalString(object, where, "streamId"); err != nil {
 		return call, err
 	}
 	if _, present := get(object, "options"); !present {
@@ -293,13 +294,14 @@ func parseTrack(object avoinspector.OrderedMap, where string) (trackCall, error)
 		return call, err
 	}
 	where += "options."
-	if call.options.OutputReference, _, err = optionalString(options, where, "outputReference"); err != nil {
+	call.gateway = &avoinspector.GatewayOptions{}
+	if call.gateway.OutputReference, _, err = optionalString(options, where, "outputReference"); err != nil {
 		return call, err
 	}
-	if call.options.OriginHint, _, err = optionalString(options, where, "originHint"); err != nil {
+	if call.gateway.OriginHint, _, err = optionalString(options, where, "originHint"); err != nil {
 		return call, err
 	}
-	call.options.OriginAppVersion, _, err = optionalString(options, where, "originAppVersion")
+	call.gateway.OriginAppVersion, _, err = optionalString(options, where, "originAppVersion")
 	return call, err
 }
 
@@ -366,7 +368,7 @@ func parseTrackN(object avoinspector.OrderedMap, where string, s step) (step, er
 
 // track calls the SDK with a checked track input. The option values are passed verbatim.
 func track(inspector *avoinspector.AvoInspector, call trackCall) (interface{}, string) {
-	schema, err := inspector.TrackOrderedSchemaFromEvent(call.eventName, call.properties, call.options)
+	schema, err := inspector.TrackOrderedSchemaFromEvent(call.eventName, call.properties, call.streamID, call.gateway)
 	if err != nil {
 		return err.Error(), "reject"
 	}
@@ -386,7 +388,7 @@ func runSequence(inspector *avoinspector.AvoInspector, steps []step) []stepRecor
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					_, _ = inspector.TrackOrderedSchemaFromEvent(s.prefix+strconv.Itoa(i), avoinspector.OrderedMap{}, avoinspector.TrackOptions{StreamId: s.streamID})
+					_, _ = inspector.TrackOrderedSchemaFromEvent(s.prefix+strconv.Itoa(i), avoinspector.OrderedMap{}, s.streamID, nil)
 				}(i)
 			}
 			wg.Wait()

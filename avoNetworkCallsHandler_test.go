@@ -24,7 +24,7 @@ func TestWire_BodyAndHeaders(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Dev, AppName: "TestApp"})
 
 	_, err := inspector.TrackSchemaFromEventWithOptions("User Signed Up",
-		map[string]interface{}{"plan": "pro", "seats": 3}, TrackOptions{StreamId: "stream-abc"})
+		map[string]interface{}{"plan": "pro", "seats": 3}, "stream-abc", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,21 +162,23 @@ func TestWire_HeaderControlCharacterGuard(t *testing.T) {
 func TestWire_GatewayOptions(t *testing.T) {
 	testCases := []struct {
 		name            string
-		options         TrackOptions
+		gateway         *GatewayOptions
 		appVersion      interface{}
 		outputReference interface{}
 		originHint      interface{}
 	}{
-		{"all set, trimmed", TrackOptions{OutputReference: "  meta-x7k2q\nb  ", OriginHint: "\tandroid\rtv \n", OriginAppVersion: "  4.2.0 "}, "4.2.0", "meta-x7k2q\nb", "android\rtv"},
-		{"hint without version", TrackOptions{OriginHint: " android "}, nil, "<absent>", "android"},
-		{"version without hint", TrackOptions{OutputReference: " meta ", OriginAppVersion: " 4.2.0 "}, "4.2.0", "meta", "<absent>"},
-		{"blank values are absent", TrackOptions{OutputReference: "   ", OriginHint: "", OriginAppVersion: "  "}, "1.0.0", "<absent>", "<absent>"},
+		{"all set, trimmed", &GatewayOptions{OutputReference: "  meta-x7k2q\nb  ", OriginHint: "\tandroid\rtv \n", OriginAppVersion: "  4.2.0 "}, "4.2.0", "meta-x7k2q\nb", "android\rtv"},
+		{"hint without version", &GatewayOptions{OriginHint: " android "}, nil, "<absent>", "android"},
+		{"version without hint", &GatewayOptions{OutputReference: " meta ", OriginAppVersion: " 4.2.0 "}, "4.2.0", "meta", "<absent>"},
+		{"blank values are absent", &GatewayOptions{OutputReference: "   ", OriginHint: "", OriginAppVersion: "  "}, "1.0.0", "<absent>", "<absent>"},
+		{"empty", &GatewayOptions{}, "1.0.0", "<absent>", "<absent>"},
+		{"nil is the same as empty", nil, "1.0.0", "<absent>", "<absent>"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newTestServer(t, nil)
 			inspector := mustInspector(t, Options{Env: Dev})
-			_, _ = inspector.TrackSchemaFromEventWithOptions("purchase", map[string]interface{}{"appVersion": true}, tc.options)
+			_, _ = inspector.TrackSchemaFromEventWithOptions("purchase", map[string]interface{}{"appVersion": true}, "", tc.gateway)
 			event := server.captured()[0].events[0]
 			if value, ok := event["appVersion"]; !ok || value != tc.appVersion {
 				t.Errorf("appVersion: expected %v, got %v (present %v)", tc.appVersion, value, ok)

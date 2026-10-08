@@ -104,10 +104,10 @@ type Options struct {
 	DisableBatchTimer bool
 }
 
-// TrackOptions are the optional per-call inputs of TrackSchemaFromEventWithOptions.
-type TrackOptions struct {
-	// StreamId is sent verbatim as streamId, or "" when empty.
-	StreamId string
+// GatewayOptions are the gateway values of one tracked event, passed to
+// TrackSchemaFromEventWithOptions and TrackOrderedSchemaFromEvent. Each is trimmed and left out
+// of the wire body when blank; a nil *GatewayOptions is the same as an empty one.
+type GatewayOptions struct {
 	// OutputReference is the gateway output this observation was bound for (e.g. "meta-x7k2q").
 	// Empty means the observation was taken at the gateway checkpoint.
 	OutputReference string
@@ -289,14 +289,17 @@ func safeExtractSchema(eventProperties interface{}) (schema []Property) {
 }
 
 // TrackSchemaFromEvent extracts the schema of eventProperties and queues it for sending. It is
-// TrackSchemaFromEventWithOptions with no options.
+// TrackSchemaFromEventWithOptions with no stream id and no gateway values.
 func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
-	return inspector.TrackSchemaFromEventWithOptions(eventName, eventProperties, TrackOptions{})
+	return inspector.TrackSchemaFromEventWithOptions(eventName, eventProperties, "", nil)
 }
 
 // TrackSchemaFromEventWithOptions extracts the schema of eventProperties, samples the event, and
 // adds it to the pending batch, which is sent when it reaches the batch size, when the scheduled
 // flush runs, or on Flush.
+//
+// streamId is sent verbatim as the event's streamId; "" means none. gateway carries the event's
+// gateway values; nil means none, the same as &GatewayOptions{}.
 //
 // It returns the extracted schema. The returned error is non-nil only for an internal failure
 // before the event was queued; delivery failures are never returned. With a batch size of 1
@@ -305,17 +308,17 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 // or whitespace is sent as MissingEventName, and a rate-limited line reports it. While 1,000 or
 // more events wait to be sent, the call waits for room before returning, for at most about the
 // 10-second request timeout (backpressure); Destroy releases it.
-func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, options TrackOptions) ([]Property, error) {
-	return inspector.track(eventName, eventProperties, options)
+func (inspector *AvoInspector) TrackSchemaFromEventWithOptions(eventName string, eventProperties map[string]interface{}, streamId string, gateway *GatewayOptions) ([]Property, error) {
+	return inspector.track(eventName, eventProperties, streamId, gateway)
 }
 
 // TrackOrderedSchemaFromEvent is TrackSchemaFromEventWithOptions for properties given as an
 // OrderedMap, whose order the schema keeps.
-func (inspector *AvoInspector) TrackOrderedSchemaFromEvent(eventName string, eventProperties OrderedMap, options TrackOptions) ([]Property, error) {
-	return inspector.track(eventName, eventProperties, options)
+func (inspector *AvoInspector) TrackOrderedSchemaFromEvent(eventName string, eventProperties OrderedMap, streamId string, gateway *GatewayOptions) ([]Property, error) {
+	return inspector.track(eventName, eventProperties, streamId, gateway)
 }
 
-func (inspector *AvoInspector) track(eventName string, eventProperties interface{}, options TrackOptions) (schema []Property, err error) {
+func (inspector *AvoInspector) track(eventName string, eventProperties interface{}, streamId string, gateway *GatewayOptions) (schema []Property, err error) {
 	inspector.mu.Lock()
 	destroyed, samplingRate := inspector.destroyed, inspector.samplingRate
 	inspector.mu.Unlock()
@@ -337,7 +340,6 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		})
 	}
 	schema = safeExtractSchema(eventProperties)
-	streamId := options.StreamId
 	if strings.Contains(streamId, ":") {
 		logLimited("streamid-colon", 1, func(_, suppressed int, seconds int64) string {
 			return "streamId contains ':'; using the value verbatim." + suppressedSuffix(suppressed, seconds)
@@ -353,6 +355,10 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 		return schema, nil
 	}
 
+	var options GatewayOptions
+	if gateway != nil {
+		options = *gateway
+	}
 	event := inspector.newWireEvent(eventName, streamId, samplingRate, schema, options)
 
 	var (
@@ -410,7 +416,7 @@ func (inspector *AvoInspector) track(eventName string, eventProperties interface
 }
 
 // newWireEvent builds the wire body of one event, resolving the gateway options (SPEC.md §7.3.6).
-func (inspector *AvoInspector) newWireEvent(eventName, streamId string, samplingRate float64, schema []Property, options TrackOptions) wireEvent {
+func (inspector *AvoInspector) newWireEvent(eventName, streamId string, samplingRate float64, schema []Property, options GatewayOptions) wireEvent {
 	outputReference := strings.TrimSpace(options.OutputReference)
 	originHint := strings.TrimSpace(options.OriginHint)
 	var appVersion *string

@@ -193,7 +193,7 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
 			// Send directly, bypassing the per-event sampling decision.
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, TrackOptions{})
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, GatewayOptions{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -228,7 +228,7 @@ func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
 			})
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, TrackOptions{})
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, GatewayOptions{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -822,7 +822,7 @@ func TestLogging_NeverShowsPropertyValues(t *testing.T) {
 
 	staging := mustInspector(t, Options{ApiKey: apiKey, Env: Staging, BatchSize: 30, MaxQueueSize: 1, DisableBatchTimer: true})
 	staging.EnableLogging(true)
-	_, _ = staging.TrackSchemaFromEventWithOptions("Signed Up", properties, TrackOptions{StreamId: "s:1", OriginHint: "web"})
+	_, _ = staging.TrackSchemaFromEventWithOptions("Signed Up", properties, "s:1", &GatewayOptions{OriginHint: "web"})
 	_, _ = staging.TrackSchemaFromEvent("Signed Up", properties)
 	_ = staging.Flush(2 * time.Second)
 	server.Close()
@@ -1064,13 +1064,13 @@ func TestLogging_StreamIdColonWarningIsRateLimited(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 5; i++ {
-		_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, TrackOptions{StreamId: "user:42"})
+		_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, "user:42", nil)
 	}
 	if n := countLines(logs(), "streamId contains ':'"); n != 1 {
 		t.Fatalf("expected one warning in the window, got %d:\n%s", n, logs())
 	}
 	advance(logRateWindow)
-	_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, TrackOptions{StreamId: "user:42"})
+	_, _ = inspector.TrackSchemaFromEventWithOptions("E", nil, "user:42", nil)
 	if !strings.Contains(logs(), "[Avo Inspector] streamId contains ':'; using the value verbatim. (4 more in the last 10s)") {
 		t.Errorf("expected the suppressed count:\n%s", logs())
 	}
