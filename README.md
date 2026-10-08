@@ -275,7 +275,12 @@ therefore costs about as much as one with 10,000.
 
 Neither limit is logged when it applies. Elements of a list that are strings, numbers or booleans
 never count toward either limit, and a `[]byte` or other slice of a scalar type is typed from its
-element type without visiting its elements, whatever its size.
+element type without visiting its elements, whatever its size. A slice or array of numbers is typed
+this way even when empty: an empty `[]float64` is `list(float)` with children `["float"]`.
+
+A list's `children` hold each distinct element schema once, in the order first seen: two objects
+with the same properties (in any order) and the same types are one entry, as are two lists with the
+same children. This applies to the schema only; every element still counts toward the limits.
 
 For example, a map that refers to itself:
 
