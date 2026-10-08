@@ -314,10 +314,14 @@ func basicTypeName(kind valueKind) string {
 }
 
 // propValueType is the SPEC.md §9.2 getPropValueType: a list is typed by its first element, and
-// an empty list (or one whose first element is null) defaults to "list(string)".
+// an empty list (or one whose first element is null) defaults to "list(string)". A typed slice or
+// array of numbers is typed by its element type instead, so an empty []float64 is "list(float)".
 func propValueType(value interface{}, kind valueKind) string {
 	if kind != kindList {
 		return basicTypeName(kind)
+	}
+	if elementKind, ok := numericElementKind(value); ok {
+		return "list(" + basicTypeName(elementKind) + ")"
 	}
 	first, ok := firstElement(value)
 	if !ok {
@@ -366,9 +370,9 @@ func (p *schemaParser) enterObject(value interface{}, id nodeIdentity, depth int
 	return result
 }
 
-// enterList maps a list value with its identity on the ancestor path. A non-empty typed slice or
-// array whose element type alone decides its elements' kind maps to that one type without visiting
-// its elements, so its size costs nothing; it still counts as one expansion.
+// enterList maps a list value with its identity on the ancestor path. A typed slice or array whose
+// element type alone decides its elements' kind maps to that one type without visiting its
+// elements, so its size costs nothing; it still counts as one expansion.
 func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) []interface{} {
 	pushed := p.push(id)
 	defer p.pop(pushed)
@@ -378,11 +382,15 @@ func (p *schemaParser) enterList(value interface{}, id nodeIdentity, depth int) 
 	return p.mapList(listElements(value), depth)
 }
 
-// uniformElementKind returns the kind every element of a non-empty typed slice or array has when
-// its element type alone decides it: a scalar, or a kind classify always reports as unknown
-// (struct, complex, func, chan, unsafe pointer). Element types whose kind depends on the value
-// (interfaces, pointers, maps, slices, arrays, and json.Number, typed by its text) report false.
+// uniformElementKind returns the kind every element of a typed slice or array has when its
+// element type alone decides it: a scalar, or a kind classify always reports as unknown (struct,
+// complex, func, chan, unsafe pointer). Element types whose kind depends on the value (interfaces,
+// pointers, maps, slices, arrays, and json.Number, typed by its text) report false. An empty one
+// reports false too, unless its elements are numbers (see numericElementKind).
 func uniformElementKind(value interface{}) (valueKind, bool) {
+	if kind, ok := numericElementKind(value); ok {
+		return kind, true
+	}
 	if _, ok := value.([]interface{}); ok {
 		return kindUnknown, false
 	}
@@ -397,6 +405,25 @@ func uniformElementKind(value interface{}) (valueKind, bool) {
 	switch elem.Kind() {
 	case reflect.Struct, reflect.Complex64, reflect.Complex128, reflect.Func, reflect.Chan, reflect.UnsafePointer:
 		return kindUnknown, true
+	}
+	return kindUnknown, false
+}
+
+// numericElementKind returns kindInt or kindFloat for a typed slice or array of integers or
+// floats, []byte included, whatever its length: such a list is typed by its element type, like a
+// binary value or a primitive array in the other SDKs, so an empty one has the same type and
+// children as a non-empty one. Any other list reports false.
+func numericElementKind(value interface{}) (valueKind, bool) {
+	if _, ok := value.([]interface{}); ok {
+		return kindUnknown, false
+	}
+	rv := indirect(reflect.ValueOf(value))
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return kindUnknown, false
+	}
+	switch kind := scalarKind(rv.Type().Elem().Kind()); kind {
+	case kindInt, kindFloat:
+		return kind, true
 	}
 	return kindUnknown, false
 }

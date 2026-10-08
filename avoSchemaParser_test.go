@@ -517,7 +517,8 @@ func TestExtractSchema_BudgetMatchesNode(t *testing.T) {
 type namedString string
 
 // A typed slice of scalars has one child type, whatever its length; []json.Number still types
-// each element (SPEC.md §9.3.1.1).
+// each element (SPEC.md §9.3.1.1). A typed slice or array of numbers is typed by its element type
+// even when empty; an empty one of strings or booleans is "list(string)" with no children.
 func TestExtractSchema_TypedScalarSlices(t *testing.T) {
 	array := [3]float32{1, 2, 3}
 	floats := []float64{1.5, 2}
@@ -529,6 +530,13 @@ func TestExtractSchema_TypedScalarSlices(t *testing.T) {
 		{"parr", &array},
 		{"pslice", &floats},
 		{"empty", []int{}},
+		{"emptyFloats", []float64{}},
+		{"emptyFloats32", [0]float32{}},
+		{"emptyBytes", []byte{}},
+		{"emptyUints", &[]uint16{}},
+		{"emptyStrings", []string{}},
+		{"emptyBools", []bool{}},
+		{"emptyNums", []json.Number{}},
 		{"iface", list{1, "a", 2, 1.5, "b", nil, om{{"x", 1}}, 3}},
 		{"ptrs", []*int{nil}},
 		{"u", []uintptr{1}},
@@ -539,7 +547,14 @@ func TestExtractSchema_TypedScalarSlices(t *testing.T) {
 		`{"propertyName":"arr","propertyType":"list(float)","children":["float"]},`+
 		`{"propertyName":"parr","propertyType":"list(float)","children":["float"]},`+
 		`{"propertyName":"pslice","propertyType":"list(float)","children":["float"]},`+
-		`{"propertyName":"empty","propertyType":"list(string)","children":[]},`+
+		`{"propertyName":"empty","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"emptyFloats","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"emptyFloats32","propertyType":"list(float)","children":["float"]},`+
+		`{"propertyName":"emptyBytes","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"emptyUints","propertyType":"list(int)","children":["int"]},`+
+		`{"propertyName":"emptyStrings","propertyType":"list(string)","children":[]},`+
+		`{"propertyName":"emptyBools","propertyType":"list(string)","children":[]},`+
+		`{"propertyName":"emptyNums","propertyType":"list(string)","children":[]},`+
 		`{"propertyName":"iface","propertyType":"list(int)","children":["int","string","float","null",[{"propertyName":"x","propertyType":"int"}]]},`+
 		`{"propertyName":"ptrs","propertyType":"list(string)","children":["null"]},`+
 		`{"propertyName":"u","propertyType":"list(int)","children":["int"]},`+
@@ -624,10 +639,10 @@ func TestExtractSchema_LargeStructListsAllocateLittle(t *testing.T) {
 // A list mapped without visiting its elements still counts as one expansion.
 func TestExtractSchema_UniformListsCountOneExpansion(t *testing.T) {
 	parser := &schemaParser{}
-	value := om{{"s", []struct{}{{}}}, {"f", []float64{1}}}
+	value := om{{"s", []struct{}{{}}}, {"f", []float64{1}}, {"e", []float64{}}}
 	parser.enterObject(value, identity(value), 0)
-	if parser.expansions != 3 {
-		t.Errorf("expansions = %d, want 3 (the root and two lists)", parser.expansions)
+	if parser.expansions != 4 {
+		t.Errorf("expansions = %d, want 4 (the root and three lists)", parser.expansions)
 	}
 }
 
