@@ -211,8 +211,9 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 ```
 
 To report events that pass through an Avo gateway, call `TrackSchemaFromEventWithOptions` with the
-gateway fields in a `TrackOptions`. With a gateway-scoped API key, pass all three values:
-`OutputReference`, `OriginHint` and `OriginAppVersion`.
+gateway fields in a `TrackOptions`. With a gateway-scoped API key, always pass `OriginHint` and
+`OriginAppVersion`. Pass `OutputReference` when the payload was bound for a specific output; leave
+it out for an observation at the gateway checkpoint.
 
 ```go
 if _, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, avoinspector.TrackOptions{
@@ -243,7 +244,9 @@ Go has no named arguments, so the optional per-call inputs are grouped in one `T
 passed to `TrackSchemaFromEventWithOptions` (see the example under
 [Sending event schemas](#sending-event-schemas)).
 
-All fields are optional; with a gateway-scoped API key, set all three gateway fields. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
+Every field can be left empty; with a gateway-scoped API key, pass the ones described under
+[Sending event schemas](#sending-event-schemas). An empty `OutputReference` means the observation
+was taken at the gateway checkpoint. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
 `"android"`, never a user identifier. A non-blank `OriginAppVersion` replaces the inspector's app
 version for that event, whether or not `OriginHint` is set. When `OriginHint` is set and
 `OriginAppVersion` is blank, the event is sent without an app version.
