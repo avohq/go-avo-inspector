@@ -181,7 +181,7 @@ that kind, by `Flush` once that kind's 10-second window has passed, or by `Destr
 whichever comes first. So a burst followed by quiet is still reported, while an app that calls
 `Flush` after every event keeps the rate limit. "In the last Ns" is the real time the count
 covers, in whole seconds since that window's first occurrence (at least 1): a count reported long
-after the burst says so. The warning for a `StreamId` containing `:` is rate-limited the same way. Response bodies
+after the burst says so. The warning for a stream id containing `:` is rate-limited the same way. Response bodies
 are never logged, and a caught error or panic is logged by its type only, never its message, which
 can carry data from your events. Everything else, such as events dropped by sampling
 and per-event debug lines, is logged only when logging is enabled. Sends abandoned by `Destroy` are
@@ -210,14 +210,13 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 })
 ```
 
-To report events that pass through an Avo gateway, call `TrackSchemaFromEventWithOptions` with the
-gateway fields in a `TrackOptions`. With a gateway-scoped API key, always pass `OriginHint` and
+To report events that pass through an Avo gateway, call `TrackSchemaFromEventWithOptions` with a
+stream id and the gateway fields in a `GatewayOptions`. With a gateway-scoped API key, always pass `OriginHint` and
 `OriginAppVersion`. Pass `OutputReference` when the payload was bound for a specific output; leave
 it out for an observation at the gateway checkpoint.
 
 ```go
-if _, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, avoinspector.TrackOptions{
-	StreamId:         "stream-123", // correlation id, sent verbatim
+if _, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, "stream-123", &avoinspector.GatewayOptions{
 	OutputReference:  "meta-x7k2q", // the gateway output this observation was bound for
 	OriginHint:       "android",    // the source the event came from
 	OriginAppVersion: "4.2.0",      // that source's app version
@@ -240,11 +239,12 @@ the process exits (see [Shutdown](#shutdown)).
 
 ### Stream id and gateway options
 
-Go has no named arguments, so the optional per-call inputs are grouped in one `TrackOptions` struct,
-passed to `TrackSchemaFromEventWithOptions` (see the example under
-[Sending event schemas](#sending-event-schemas)).
+`TrackSchemaFromEventWithOptions` and `TrackOrderedSchemaFromEvent` take a stream id and a
+`*GatewayOptions` after the properties (see the example under
+[Sending event schemas](#sending-event-schemas)). The stream id is a correlation id, sent verbatim;
+`""` means none. A nil `*GatewayOptions` means no gateway values, the same as `&GatewayOptions{}`.
 
-Every field can be left empty; with a gateway-scoped API key, pass the ones described under
+Every gateway field can be left empty; blank values are left out of the event; with a gateway-scoped API key, pass the ones described under
 [Sending event schemas](#sending-event-schemas). An empty `OutputReference` means the observation
 was taken at the gateway checkpoint. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
 `"android"`, never a user identifier. A non-blank `OriginAppVersion` replaces the inspector's app
@@ -260,7 +260,7 @@ by key. To keep a specific order, pass an `OrderedMap`, at the top level or as a
 result, err := avoInspector.TrackOrderedSchemaFromEvent("Signup", avoinspector.OrderedMap{
 	{Key: "plan", Value: "pro"},
 	{Key: "seats", Value: 3},
-}, avoinspector.TrackOptions{})
+}, "", nil)
 ```
 
 `ExtractSchema` and `ExtractOrderedSchema` return the schema without sending anything.
