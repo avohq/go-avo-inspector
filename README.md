@@ -210,6 +210,23 @@ result, err := avoInspector.TrackSchemaFromEvent("Test Event", map[string]interf
 })
 ```
 
+To report events that pass through an Avo gateway, call `TrackSchemaFromEventWithOptions` with the
+gateway fields in a `TrackOptions`. With a gateway-scoped API key, pass all three values:
+`OutputReference`, `OriginHint` and `OriginAppVersion`.
+
+```go
+if _, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, avoinspector.TrackOptions{
+	StreamId:         "stream-123", // correlation id, sent verbatim
+	OutputReference:  "meta-x7k2q", // the gateway output this observation was bound for
+	OriginHint:       "android",    // the source the event came from
+	OriginAppVersion: "4.2.0",      // that source's app version
+}); err != nil {
+	log.Print("Avo Inspector track: ", err)
+}
+```
+
+See [Stream id and gateway options](#stream-id-and-gateway-options) for what each field means.
+
 `TrackSchemaFromEvent` returns the extracted schema. Since v2 its `error` only reports an
 internal failure before the event was queued; it is never an HTTP or network failure. A failed
 send is logged and its events are dropped, without retry. In `Dev`,
@@ -222,18 +239,11 @@ the process exits (see [Shutdown](#shutdown)).
 
 ### Stream id and gateway options
 
-Go has no named arguments, so the optional per-call inputs are grouped in one `TrackOptions` struct:
+Go has no named arguments, so the optional per-call inputs are grouped in one `TrackOptions` struct,
+passed to `TrackSchemaFromEventWithOptions` (see the example under
+[Sending event schemas](#sending-event-schemas)).
 
-```go
-result, err := avoInspector.TrackSchemaFromEventWithOptions("Purchase", properties, avoinspector.TrackOptions{
-	StreamId:         "stream-123", // correlation id, sent verbatim
-	OutputReference:  "meta-x7k2q", // the gateway output this observation was bound for
-	OriginHint:       "android",    // the source the event came from
-	OriginAppVersion: "4.2.0",      // that source's app version
-})
-```
-
-All fields are optional. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
+All fields are optional; with a gateway-scoped API key, set all three gateway fields. `OriginHint` must be a low-cardinality label such as `"web"`, `"ios"` or
 `"android"`, never a user identifier. A non-blank `OriginAppVersion` replaces the inspector's app
 version for that event, whether or not `OriginHint` is set. When `OriginHint` is set and
 `OriginAppVersion` is blank, the event is sent without an app version.
