@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	avoinspector "github.com/avohq/go-avo-inspector"
+	"log"
+
+	avoinspector "github.com/avohq/go-avo-inspector/v2"
 )
 
 func main() {
@@ -18,10 +20,32 @@ func main() {
 		"func": func() {},
 	}
 
-	avoInspector, _ := avoinspector.NewAvoInspector("_", avoinspector.Dev, "1.0", "my app")
+	avoInspector, err := avoinspector.NewAvoInspector("_", avoinspector.Dev, "1.0", "my app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Send anything still buffered before main returns; buffered events are lost at exit.
+	defer func() {
+		// ErrFlushTimeout means Flush returned before all events were sent; those may not arrive
+		// once main returns. This example logs it and exits anyway.
+		if err := avoInspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+			log.Print("Avo Inspector flush: ", err)
+		}
+	}()
 
-	call, _ := avoInspector.TrackSchemaFromEvent("Test Event", data)
+	call, err := avoInspector.TrackSchemaFromEvent(avoinspector.InspectorEvent{
+		EventName:       "Test Event",
+		EventProperties: data,
+	})
+	if err != nil {
+		log.Print("Avo Inspector track: ", err)
+		return
+	}
 
-	result, _ := json.MarshalIndent(call, "", "  ")
+	result, err := json.MarshalIndent(call, "", "  ")
+	if err != nil {
+		log.Print(err)
+		return
+	}
 	println(string(result))
 }
