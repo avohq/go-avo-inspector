@@ -99,7 +99,15 @@ func TestAvoInspector_TrackSchemaFromEvent(t *testing.T) {
 	version := "1.0.0"
 	appName := "MyApp"
 
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"samplingRate":1.0}`))
+	}))
+	defer server.Close()
+
 	inspector, _ := NewAvoInspector(apiKey, env, version, appName)
+	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
 
 	eventName := "TestEvent"
 	eventProperties := map[string]interface{}{
@@ -162,17 +170,25 @@ func TestAvoInspector_TrackSchemaFromEventWithStreamId(t *testing.T) {
 	version := "1.0.0"
 	appName := "MyApp"
 
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"samplingRate":1.0}`))
+	}))
+	defer server.Close()
+
 	inspector, _ := NewAvoInspector(apiKey, env, version, appName)
+	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
 
 	eventName := "TestEvent"
 	eventProperties := map[string]interface{}{
 		"param1": "value1",
 	}
 
-	// This should work (will fail with 400 from server, but that's expected)
+	// Stub server rejects the call with 400, which must surface as an error
 	_, err := inspector.TrackSchemaFromEventWithStreamId(eventName, eventProperties, "user-123")
 	if err == nil {
-		t.Error("expected error from API call (no valid API key)")
+		t.Error("expected error from API call (server returned 400)")
 	}
 }
 
@@ -225,7 +241,15 @@ func TestAvoInspector_StreamIdWithColonLogsWarning(t *testing.T) {
 	version := "1.0.0"
 	appName := "MyApp"
 
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"samplingRate":1.0}`))
+	}))
+	defer server.Close()
+
 	inspector, _ := NewAvoInspector(apiKey, env, version, appName)
+	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
 
 	// Capture log output
 	var buf bytes.Buffer
@@ -247,13 +271,49 @@ func TestAvoInspector_StreamIdWithColonLogsWarning(t *testing.T) {
 	}
 }
 
+func TestAvoInspector_StreamIdWithColonLogsWarning_EvenWithLoggingDisabled(t *testing.T) {
+	// Spec §4.2: the colon warning MUST be emitted regardless of the logging flag.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"samplingRate":1.0}`))
+	}))
+	defer server.Close()
+
+	inspector, _ := NewAvoInspector("API_KEY", Prod, "1.0.0", "MyApp")
+	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
+	if inspector.shouldLog {
+		t.Fatal("expected logging to be disabled in Prod")
+	}
+
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	inspector.TrackSchemaFromEventWithStreamId("TestEvent", map[string]interface{}{"param1": "value1"}, "user:123")
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "[Avo Inspector] Warning: streamId contains ':' which is not supported") {
+		t.Errorf("expected warning about streamId containing ':' with logging disabled, got log output: '%s'", logOutput)
+	}
+}
+
 func TestAvoInspector_StreamIdWithoutColonNoWarning(t *testing.T) {
 	apiKey := "API_KEY"
 	env := Dev
 	version := "1.0.0"
 	appName := "MyApp"
 
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"samplingRate":1.0}`))
+	}))
+	defer server.Close()
+
 	inspector, _ := NewAvoInspector(apiKey, env, version, appName)
+	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
 
 	var buf bytes.Buffer
 	orig := log.Writer()

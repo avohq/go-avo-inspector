@@ -132,7 +132,7 @@ func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}
 
 func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(streamId string, eventName string, eventProperties []Property) EventSchemaBody {
 	var props interface{}
-	if shouldEncrypt(avo.envName, avo.publicEncryptionKey) {
+	if shouldEncrypt(AvoInspectorEnv(avo.envName), avo.publicEncryptionKey) {
 		props = encryptEventProperties(eventProperties, avo.publicEncryptionKey)
 	} else {
 		props = eventProperties

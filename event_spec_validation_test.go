@@ -302,6 +302,42 @@ func TestEventSpecFetcher_SuccessfulFetch(t *testing.T) {
 	}
 }
 
+func TestEventSpecFetcher_EncodesQueryParams(t *testing.T) {
+	var gotPath string
+	var gotQuery map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"eventName": "Order Completed & Paid"}`))
+	}))
+	defer server.Close()
+
+	fetcher := newEventSpecFetcher(server.URL)
+
+	apiKey := "key=with&special"
+	streamId := "stream #1"
+	eventName := "Order Completed & Paid"
+	if _, err := fetcher.doFetch(apiKey, streamId, eventName); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != "/api/event-spec" {
+		t.Errorf("expected path '/api/event-spec', got '%s'", gotPath)
+	}
+	expected := map[string]string{"apiKey": apiKey, "streamId": streamId, "eventName": eventName}
+	for param, want := range expected {
+		values := gotQuery[param]
+		if len(values) != 1 || values[0] != want {
+			t.Errorf("expected query param %s=%q, got %v", param, want, values)
+		}
+	}
+	if len(gotQuery) != len(expected) {
+		t.Errorf("expected exactly %d query params, got %v", len(expected), gotQuery)
+	}
+}
+
 func TestEventSpecFetcher_InFlightDedup_SingleHTTPRequest(t *testing.T) {
 	var requestCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -696,7 +732,7 @@ func TestValidation_ActiveInDev(t *testing.T) {
 	}
 	inspector.avoNetworkCallsHandler.trackingEndpoint = server.URL
 
-	if !inspector.isValidationEnabled() {
+	if !inspector.isValidationEnvironment() {
 		t.Error("expected validation to be enabled in Dev")
 	}
 }
@@ -707,7 +743,7 @@ func TestValidation_ActiveInStaging(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !inspector.isValidationEnabled() {
+	if !inspector.isValidationEnvironment() {
 		t.Error("expected validation to be enabled in Staging")
 	}
 }
@@ -718,7 +754,7 @@ func TestValidation_NotActiveInProd(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if inspector.isValidationEnabled() {
+	if inspector.isValidationEnvironment() {
 		t.Error("expected validation to NOT be enabled in Prod")
 	}
 }
@@ -853,9 +889,9 @@ func TestFetchAndValidateAsync_UsesCacheOnSecondCall(t *testing.T) {
 }
 
 func TestEventSpecCache_KeyFormat(t *testing.T) {
-	// Verify cache key format is apiKey:streamId:eventName
+	// Verify cache key is length-prefixed: len:apiKey|len:streamId|len:eventName
 	key := specCacheKey("my-api-key", "stream-1", "Purchase")
-	expected := "my-api-key:stream-1:Purchase"
+	expected := "10:my-api-key|8:stream-1|8:Purchase"
 	if key != expected {
 		t.Errorf("expected cache key '%s', got '%s'", expected, key)
 	}
@@ -863,8 +899,26 @@ func TestEventSpecCache_KeyFormat(t *testing.T) {
 
 func TestEventSpecCache_KeyFormat_EmptyStreamId(t *testing.T) {
 	key := specCacheKey("my-api-key", "", "Purchase")
-	expected := "my-api-key::Purchase"
+	expected := "10:my-api-key|0:|8:Purchase"
 	if key != expected {
 		t.Errorf("expected cache key '%s', got '%s'", expected, key)
+	}
+}
+
+func TestEventSpecCache_Key_NoCollisionWithSeparatorsInValues(t *testing.T) {
+	// With a plain ':' join these tuples would all map to "k:a:b:c"
+	keys := []string{
+		specCacheKey("k", "a:b", "c"),
+		specCacheKey("k", "a", "b:c"),
+		specCacheKey("k:a", "b", "c"),
+		specCacheKey("k", "a|1:b", "c"),
+		specCacheKey("k", "a", "1:b|c"),
+	}
+	seen := map[string]int{}
+	for i, key := range keys {
+		if j, dup := seen[key]; dup {
+			t.Errorf("cache key collision between tuple %d and %d: '%s'", j, i, key)
+		}
+		seen[key] = i
 	}
 }

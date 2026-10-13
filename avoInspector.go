@@ -23,8 +23,8 @@ type AvoInspector struct {
 	version                string
 	avoNetworkCallsHandler *AvoNetworkCallsHandler
 	shouldLog              bool
-	// publicEncryptionKey is reserved for STORY-13 (Go payload encryption).
-	// Currently stored but not yet used for encryption operations.
+	// publicEncryptionKey is the hex-encoded P-256 public key used for ECIES
+	// encryption of property values in dev/staging (see shouldEncrypt).
 	publicEncryptionKey string
 	specFetcher         *eventSpecFetcher
 	specCache           *eventSpecCache
@@ -76,16 +76,16 @@ func (inspector *AvoInspector) EnableValidation() {
 	}
 }
 
-// isValidationEnabled returns true if event spec validation is active.
-// Validation is active in dev and staging only, NOT in prod.
-func (inspector *AvoInspector) isValidationEnabled() bool {
+// isValidationEnvironment returns true if the environment supports event spec validation.
+// Validation runs in dev and staging only, NOT in prod, and only after EnableValidation().
+func (inspector *AvoInspector) isValidationEnvironment() bool {
 	return inspector.environment == Dev || inspector.environment == Staging
 }
 
 // fetchAndValidateAsync fetches the event spec and validates properties asynchronously.
 // Does nothing if validation is not enabled (prod environment) or if specFetcher is not set.
 func (inspector *AvoInspector) fetchAndValidateAsync(eventName string, streamId string, eventSchema []Property) {
-	if !inspector.isValidationEnabled() || inspector.specFetcher == nil {
+	if !inspector.isValidationEnvironment() || inspector.specFetcher == nil {
 		return
 	}
 
@@ -110,7 +110,9 @@ func (inspector *AvoInspector) fetchAndValidateAsync(eventName string, streamId 
 			if inspector.shouldLog {
 				log.Printf("[Avo Inspector] Failed to fetch spec for '%s': %v", eventName, err)
 			}
-			// Cache nil to avoid re-fetching on failure
+			// Cache nil to avoid re-fetching on every track call during an outage.
+			// The entry expires after the cache TTL (60s), so validation resumes
+			// automatically. Matches java/js/ios/android/flutter SDKs.
 			inspector.specCache.set(cacheKey, nil)
 			return
 		}
@@ -134,6 +136,8 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventPrope
 }
 
 func (inspector *AvoInspector) TrackSchemaFromEventWithStreamId(eventName string, eventProperties map[string]interface{}, streamId string) ([]Property, error) {
+	// Intentionally not gated on shouldLog: the Inspector SDK spec (§4.2) requires
+	// this warning regardless of the logging flag, matching the node SDK.
 	if strings.Contains(streamId, ":") {
 		log.Printf("[Avo Inspector] Warning: streamId contains ':' which is not supported")
 	}

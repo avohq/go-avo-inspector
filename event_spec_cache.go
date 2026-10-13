@@ -1,6 +1,7 @@
 package avoinspector
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -36,8 +37,14 @@ func newEventSpecCache() *eventSpecCache {
 }
 
 // specCacheKey builds the cache key from apiKey, streamId, and eventName.
+// Each component is length-prefixed so values containing the separator
+// (e.g. an eventName with ':') can never collide with another tuple.
 func specCacheKey(apiKey, streamId, eventName string) string {
-	return apiKey + ":" + streamId + ":" + eventName
+	return fmt.Sprintf("%d:%s|%d:%s|%d:%s",
+		len(apiKey), apiKey,
+		len(streamId), streamId,
+		len(eventName), eventName,
+	)
 }
 
 // get retrieves a cached entry. Returns the spec and true if found,

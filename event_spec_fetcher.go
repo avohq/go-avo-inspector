@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -108,10 +109,13 @@ func (f *eventSpecFetcher) doFetch(apiKey, streamId, eventName string) (*EventSp
 	ctx, cancel := context.WithTimeout(context.Background(), fetchWallTimeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/api/event-spec?apiKey=%s&streamId=%s&eventName=%s",
-		f.baseURL, apiKey, streamId, eventName)
+	query := url.Values{}
+	query.Set("apiKey", apiKey)
+	query.Set("streamId", streamId)
+	query.Set("eventName", eventName)
+	requestURL := f.baseURL + "/api/event-spec?" + query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create spec request: %v", err)
 	}

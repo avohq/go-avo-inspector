@@ -16,11 +16,11 @@ import (
 // shouldEncrypt returns true when property encryption should be applied.
 // Encryption is enabled for dev and staging environments when a non-empty key is provided.
 // Production never encrypts (properties are sent as-is or omitted).
-func shouldEncrypt(env string, publicEncryptionKey string) bool {
+func shouldEncrypt(env AvoInspectorEnv, publicEncryptionKey string) bool {
 	if publicEncryptionKey == "" {
 		return false
 	}
-	return env == "dev" || env == "staging"
+	return env == Dev || env == Staging
 }
 
 // encryptPropertyValue encrypts a plaintext string using ECIES with AES-256-GCM (16-byte nonce).
