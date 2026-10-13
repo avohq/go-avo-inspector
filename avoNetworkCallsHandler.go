@@ -243,14 +243,17 @@ func (h *AvoNetworkCallsHandler) send(ctx context.Context, events []wireEvent) s
 		return sendResult{status: sendFailed, err: errRequestFailed}
 	}
 	defer res.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes))
+	// Read one byte past the limit: LimitReader reports a clean EOF at the limit, so only the extra
+	// byte tells a body that fits from one that was cut off.
+	body, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 
 	if res.StatusCode != http.StatusOK {
 		return sendResult{status: sendNon200, statusCode: res.StatusCode, err: errors.New("Inspector API returned status " + strconv.Itoa(res.StatusCode))}
 	}
-	// The status decides: a 200 is delivered even when its body is cut off, but a cut-off body is
-	// not read for a samplingRate, even when the bytes that arrived parse.
-	if readErr != nil {
+	// The status decides: a 200 is delivered even when its body is cut off (by the connection or
+	// by the read limit), but a cut-off body is not read for a samplingRate, even when the bytes
+	// that arrived parse.
+	if readErr != nil || len(body) > maxResponseBytes {
 		return sendResult{status: sendOk}
 	}
 	return sendResult{status: sendOk, samplingRate: parseSamplingRate(body)}

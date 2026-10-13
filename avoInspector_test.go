@@ -245,6 +245,41 @@ func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
 	}
 }
 
+// A 200 body longer than maxResponseBytes is cut off by the read limit, so it is treated like a
+// truncated body: delivered, and not read for a samplingRate even when the prefix parses. A body
+// of exactly maxResponseBytes is complete and is read.
+func TestSamplingRate_200BodyOverReadLimitIsDeliveredAndIgnored(t *testing.T) {
+	prefix := `{"samplingRate":0}`
+	testCases := []struct {
+		name     string
+		body     string
+		expected float64
+	}{
+		{"over the limit", prefix + strings.Repeat(" ", maxResponseBytes), 0.5},
+		{"exactly the limit", prefix + strings.Repeat(" ", maxResponseBytes-len(prefix)), 0},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			newTestServer(t, respondWith(200, tc.body))
+			inspector := mustInspector(t, Options{Env: Dev})
+			inspector.setSamplingRate(0.5)
+			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
+			inspector.mu.Lock()
+			inspector.pending = []wireEvent{event}
+			batch, startSender, dropped := inspector.takeBatch()
+			inspector.mu.Unlock()
+			inspector.launch(batch, startSender, dropped)
+			res := <-batch.result
+			inspector.mu.Lock()
+			rate := inspector.samplingRate
+			inspector.mu.Unlock()
+			if res.status != sendOk || rate != tc.expected {
+				t.Errorf("expected a delivered send and samplingRate %v, got status %v (%v) and %v", tc.expected, res.status, res.err, rate)
+			}
+		})
+	}
+}
+
 func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 	server := newTestServer(t, respondWith(200, `{"samplingRate":1}`))
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
