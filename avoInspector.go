@@ -662,8 +662,9 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 // ErrFlushTimeout otherwise, such as when ctx is done first. Either way the pending events are
 // queued for sending and the inspector stays usable; ErrFlushTimeout means some may not have been
 // sent yet, and callers may otherwise ignore it. Delivery failures are not reported. On a destroyed
-// inspector Flush returns nil. Call Flush before the process or serverless handler exits, for
-// example with the context passed to http.Server.Shutdown: pending events are otherwise lost.
+// inspector Flush returns nil. Call Flush before the process or serverless handler exits, with a
+// context that still has time for the sends (after http.Server.Shutdown, not the context it may
+// have used up): pending events are otherwise lost.
 func (inspector *AvoInspector) Flush(ctx context.Context) error {
 	// Report held log counts whose window has expired, after the sends this call waited for.
 	defer flushLogCounts(true)

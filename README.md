@@ -56,7 +56,10 @@ go func() { _ = server.ListenAndServe() }()
 shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 defer cancel()
 _ = server.Shutdown(shutdownCtx) // let in-flight requests finish tracking
-if err := inspector.Flush(shutdownCtx); err != nil {
+// Give Flush its own budget: Shutdown may have used all of shutdownCtx.
+flushCtx, cancelFlush := context.WithTimeout(context.Background(), avoinspector.DefaultFlushTimeout)
+defer cancelFlush()
+if err := inspector.Flush(flushCtx); err != nil {
 	log.Print("Avo Inspector flush: ", err) // some events may not have been sent
 }
 ```
