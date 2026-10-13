@@ -1258,9 +1258,7 @@ func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
 // Past the 10,000-event waiting allowance the oldest waiting events are dropped: what is sent is
 // the batches already in flight plus the newest 10,000, with one rate-limited drop line.
 func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
-	// Without backpressure, so the backlog can pass its 10,000-event limit.
-	backpressureThreshold = math.MaxInt32
-	t.Cleanup(func() { backpressureThreshold = backpressureEvents })
+	// Without BlockWhenBacklogged (the default), so the backlog can pass its 10,000-event limit.
 	logs := captureLogs(t)
 	advance := fakeLogClock(t)
 	server, release, _ := hungServer(t)
@@ -1668,12 +1666,12 @@ func deliveredCount(server *testServer) int {
 	return total
 }
 
-// A tight loop no longer outruns the endpoint: once 1,000 events wait for a sender, tracking calls
-// wait for room, so every event of a 20,000-event loop is delivered.
+// With BlockWhenBacklogged a tight loop no longer outruns the endpoint: once 1,000 events wait for
+// a sender, tracking calls wait for room, so every event of a 20,000-event loop is delivered.
 func TestBackpressure_TightLoopDeliversEverything(t *testing.T) {
 	logs := captureLogs(t)
 	server := slowServer(t, 20*time.Millisecond)
-	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true, BlockWhenBacklogged: true})
 	inspector.EnableLogging(false)
 	for i := 0; i < 20000; i++ {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Loop"})
@@ -1691,7 +1689,7 @@ func TestBackpressure_TightLoopDeliversEverything(t *testing.T) {
 func TestBackpressure_ConcurrentTrackers(t *testing.T) {
 	logs := captureLogs(t)
 	server := slowServer(t, 20*time.Millisecond)
-	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true, BlockWhenBacklogged: true})
 	inspector.EnableLogging(false)
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
@@ -1726,6 +1724,22 @@ func trackUntilBlocked(inspector *AvoInspector, threshold time.Duration, limit i
 	return 0
 }
 
+// By default tracking never waits for the backlog, even against a hung endpoint (SPEC.md §4.2):
+// past the 10,000-event backlog the oldest waiting events are dropped and the drop is logged.
+func TestBackpressure_OffByDefault(t *testing.T) {
+	logs := captureLogs(t)
+	_, release, _ := hungServer(t)
+	defer release()
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	if blocked := trackUntilBlocked(inspector, 50*time.Millisecond, 12000); blocked != 0 {
+		t.Errorf("expected no tracking call to wait, one took %v", blocked)
+	}
+	if !strings.Contains(logs(), "(send backlog full)") {
+		t.Errorf("expected the backlog drop to be logged, got:\n%s", logs())
+	}
+}
+
 // Against a hung endpoint the wait is bounded: a call waits at most about the bound, then returns.
 func TestBackpressure_WaitIsBounded(t *testing.T) {
 	captureLogs(t)
@@ -1733,7 +1747,7 @@ func TestBackpressure_WaitIsBounded(t *testing.T) {
 	defer release()
 	backpressureWait = 200 * time.Millisecond
 	t.Cleanup(func() { backpressureWait = requestTimeout })
-	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true, BlockWhenBacklogged: true})
 	inspector.EnableLogging(false)
 	blocked := trackUntilBlocked(inspector, 50*time.Millisecond, 2000)
 	if blocked < 150*time.Millisecond || blocked > 2*time.Second {
@@ -1746,7 +1760,7 @@ func TestBackpressure_DestroyReleasesWaiters(t *testing.T) {
 	captureLogs(t)
 	_, release, _ := hungServer(t)
 	defer release()
-	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true, BlockWhenBacklogged: true})
 	inspector.EnableLogging(false)
 	result := make(chan time.Duration, 1)
 	go func() { result <- trackUntilBlocked(inspector, 50*time.Millisecond, 2000) }()

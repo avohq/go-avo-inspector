@@ -42,8 +42,9 @@ const (
 	// MaxQueueSize, which bounds only the unsent buffer; past it the oldest waiting events are
 	// dropped.
 	maxWaitingEvents = 10000
-	// backpressureEvents is the number of events waiting for a sender at which a tracking call
-	// waits for room before returning, so a tight loop is paced by the endpoint, as in v1.
+	// backpressureEvents is the number of events waiting for a sender at which, with
+	// Options.BlockWhenBacklogged, a tracking call waits for room before returning, so a tight
+	// loop is paced by the endpoint, as in v1.
 	backpressureEvents = 1000
 
 	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
@@ -102,6 +103,13 @@ type Options struct {
 	// DisableBatchTimer turns off the scheduled flush, leaving the size trigger and Flush. Set it
 	// in serverless deployments.
 	DisableBatchTimer bool
+	// BlockWhenBacklogged makes a tracking call wait for room, for at most about 10 seconds, while
+	// 1,000 or more events wait for a sender, so a backfill loop is paced by the endpoint instead
+	// of overflowing the 10,000-event send backlog. Default false: tracking never waits for the
+	// backlog (SPEC.md §4.2), and past the backlog the oldest waiting events are dropped and the
+	// drop is logged. Do not set it for request handlers in a server: they would then wait
+	// whenever the Inspector API is slow.
+	BlockWhenBacklogged bool
 }
 
 // InspectorEvent is one tracked event, the single argument of TrackSchemaFromEvent. Every field
@@ -144,10 +152,11 @@ type AvoInspector struct {
 	appName                string
 	avoNetworkCallsHandler *AvoNetworkCallsHandler
 
-	batchSize         int
-	batchFlushSeconds float64
-	maxQueueSize      int
-	disableBatchTimer bool
+	batchSize           int
+	batchFlushSeconds   float64
+	maxQueueSize        int
+	disableBatchTimer   bool
+	blockWhenBacklogged bool
 
 	// mu guards every field below.
 	mu           sync.Mutex
@@ -258,6 +267,7 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		batchFlushSeconds:      batchFlushSeconds,
 		maxQueueSize:           maxQueueSize,
 		disableBatchTimer:      options.DisableBatchTimer,
+		blockWhenBacklogged:    options.BlockWhenBacklogged,
 		samplingRate:           1.0,
 		inFlight:               map[uint64]chan struct{}{},
 		room:                   make(chan struct{}),
@@ -542,11 +552,15 @@ func (inspector *AvoInspector) signalRoom() {
 	inspector.room = make(chan struct{})
 }
 
-// awaitRoom is the backpressure: while backpressureThreshold or more events wait for a sender, the
-// tracking call waits for room, so a loop that tracks faster than the endpoint accepts is paced by
-// it instead of overflowing the backlog. The wait ends when the backlog falls below the
-// threshold, when the inspector is destroyed, or after backpressureWait at most.
+// awaitRoom is the opt-in backpressure (Options.BlockWhenBacklogged): while backpressureThreshold
+// or more events wait for a sender, the tracking call waits for room, so a loop that tracks faster
+// than the endpoint accepts is paced by it instead of overflowing the backlog. The wait ends when
+// the backlog falls below the threshold, when the inspector is destroyed, or after
+// backpressureWait at most. Without the option it returns at once.
 func (inspector *AvoInspector) awaitRoom() {
+	if !inspector.blockWhenBacklogged {
+		return
+	}
 	deadline := time.Now().Add(backpressureWait)
 	for {
 		inspector.mu.Lock()

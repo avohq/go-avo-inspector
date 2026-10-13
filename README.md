@@ -115,18 +115,29 @@ waiting to be sent have their own limit (see [High-volume and backfill jobs](#hi
 
 ### High-volume and backfill jobs
 
-At most 4 requests are sent at once, and batches formed while all 4 are busy wait their turn. Once
-1,000 events are waiting, each tracking call waits for room before it returns, for at most about the
-10-second request timeout. A job that tracks events faster than the endpoint accepts them, such as
-a backfill loop, is therefore paced by the endpoint, as tracking was in v1, which slows the growth of
-the backlog. Pacing does not guarantee delivery. `Destroy` releases calls that are waiting.
+At most 4 requests are sent at once, and batches formed while all 4 are busy wait their turn. Up to
+10,000 events can wait; beyond that the oldest waiting events are dropped and the drop is logged,
+which keeps the events held for sending bounded. By default a tracking call never waits for this
+backlog, so a slow or unavailable endpoint adds no latency to the code that tracks.
 
-The wait is bounded, so an endpoint that is slow or down can still fall behind: up to 10,000 events
-can wait, and beyond that the oldest waiting events are dropped and the drop is logged, which keeps
-the events held for sending bounded. While the backlog is full, a tracking call can take up to
-about 10 seconds, so keep that in mind when you track from a latency-sensitive path.
+A job that tracks events faster than the endpoint accepts them, such as a backfill loop, would
+overflow the backlog. Set `BlockWhenBacklogged` for such jobs: once 1,000 events are waiting, each
+tracking call then waits for room before it returns, for at most about the 10-second request
+timeout, so the loop is paced by the endpoint, as tracking was in v1. Pacing does not guarantee
+delivery: an endpoint slow for longer than the wait can still overflow the backlog. `Destroy`
+releases calls that are waiting. Do not set it for request handlers in a server: they would then
+wait whenever the Inspector API is slow.
 
-A backfill loop needs no periodic flushes; flush at the end. `Flush` waits only up to its timeout,
+```go
+avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Options{
+	ApiKey:              apiKey,
+	Env:                 avoinspector.Prod,
+	AppVersion:          "1.0",
+	BlockWhenBacklogged: true, // backfill job: let the endpoint pace the loop
+})
+```
+
+A paced backfill loop needs no periodic flushes; flush at the end. `Flush` waits only up to its timeout,
 so when it returns `ErrFlushTimeout`, events are still waiting or in flight: flush again, bound
 those retries, then give up and log:
 
@@ -402,9 +413,9 @@ These are the behaviour changes you may notice:
 - **Events are buffered outside `Dev`.** In `Staging` and `Prod`, events are sent in batches in the
   background instead of during the call. Call `Flush` before the process exits, or buffered events
   are lost. `Dev` still sends each event before the call returns. At most 4 batches are sent at
-  once. Once 1,000 events wait to be sent, tracking calls wait for room (at most about 10 seconds),
-  so a tight loop is paced by the endpoint as it was in v1; past 10,000 waiting events the oldest
-  are dropped (see [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
+  once; past 10,000 waiting events the oldest are dropped. A backfill job that relied on v1's
+  synchronous sends to pace it should set `BlockWhenBacklogged` (see
+  [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
 - **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process. It gates
   only the debug lines (per-event lines, sampling drops) and the "sent N event(s)." line. Dropped
   events, rejected batches, failed sends and internal errors are always logged, rate-limited (see
