@@ -20,6 +20,7 @@ New API:
 - **`ExtractSchema`** returns the schema without sending anything.
 - **`Flush(ctx context.Context)` and `Destroy()`.** `Flush` sends pending events and waits for in-flight sends until `ctx` is done, so it works directly with shutdown deadlines such as the context given to `http.Server.Shutdown`; a context without a deadline waits at most `DefaultFlushTimeout` (10 seconds), so `Flush` always completes. It returns `nil` only when, as it returns, nothing is buffered, waiting or in flight, and `ErrFlushTimeout` otherwise; the error is informational. An already-cancelled context starts the sends without waiting, so it returns `nil` only when nothing was pending.
 - **`EnableLogging`**, process-wide. `ShouldLog` still works and is deprecated in favour of it.
+- **`SetLogOutput(io.Writer)`**, process-wide: where every inspector writes its log lines, stderr by default (`nil` restores it). Route them into the host's logger, or pass `io.Discard` to silence them, the always-on lines included.
 - **`Property.ListChildren`** holds a list property's element schemas. `Property.Children` now holds only an `object` property's children. Adding the field means a positional `Property` literal with three values no longer compiles; use field names.
 - **`Property` decodes as well as encodes.** `UnmarshalJSON` is the inverse of `MarshalJSON`, so the schema JSON reads back into `[]Property`.
 - **`Version`, `SpecVersion`, `LibPlatform` and `MissingEventName` constants.** `libVersion` on the wire comes from `Version`.
@@ -49,7 +50,7 @@ Delivery and robustness:
 
 Logging:
 
-- **Logs go to stderr** with an `[Avo Inspector] ` prefix. v1.0.0 wrote some to stdout and some through the standard `log` package.
+- **Logs go to stderr** (or the `SetLogOutput` writer) with an `[Avo Inspector] ` prefix. v1.0.0 wrote some to stdout and some through the standard `log` package.
 - **Logs never contain property values or the API key.** A tracked event is logged with its schema (property names and types). Because the logging flag is process-wide, the v1.0.0 line with raw parameters could print values such as emails from a prod inspector.
 - **Dropped events, rejected batches, failed sends and internal errors are always logged**, whatever `EnableLogging`. Each kind, and each reason or status within it, prints at most one line every 10 seconds. The count of what was suppressed is carried into the next line of that kind, or printed by `Flush` once its 10 seconds have passed and right away by `Destroy`, with the real number of seconds it covers (the same rule as the Node and Java SDKs, with no timer). Events tracked without a name and the `:`-in-stream-id warning are limited the same way.
 - **A caught error or panic is logged by its type only**, never its message, which can quote data from your events. Failed sends use fixed labels (`Request failed`, `Request timed out`, and so on), never the error text. Response bodies are never logged. A send abandoned by `Destroy` is not logged.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -530,6 +531,30 @@ func captureLogs(t *testing.T) func() string {
 		logMu.Lock()
 		defer logMu.Unlock()
 		return buffer.String()
+	}
+}
+
+// SetLogOutput routes every log line, the always-on ones included, and nil restores os.Stderr.
+func TestSetLogOutput_RoutesAndRestores(t *testing.T) {
+	resetLogLimiter(t)
+	logMu.Lock()
+	previous := logOutput
+	logMu.Unlock()
+	t.Cleanup(func() { SetLogOutput(previous) })
+
+	var buffer strings.Builder
+	SetLogOutput(&buffer)
+	_, _ = NewAvoInspectorWithOptions(Options{ApiKey: "k", Env: Prod, AppVersion: "1", BatchSize: -1})
+	if !strings.Contains(buffer.String(), "Invalid batchSize") {
+		t.Errorf("expected the always-on warning in the routed output, got %q", buffer.String())
+	}
+
+	SetLogOutput(nil)
+	logMu.Lock()
+	restored := logOutput
+	logMu.Unlock()
+	if restored != os.Stderr {
+		t.Errorf("expected SetLogOutput(nil) to restore os.Stderr, got %T", restored)
 	}
 }
 

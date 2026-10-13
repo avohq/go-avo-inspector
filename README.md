@@ -164,8 +164,15 @@ applies to every inspector in the process. Do not enable logs in production.
 avoInspector.EnableLogging(true)
 ```
 
-`ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr. They never
-include the API key or property values: a tracked event is logged with its schema (property names
+`ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr by
+default; `SetLogOutput` routes them elsewhere, for every inspector in the process, for example into
+your own logger or to `io.Discard` to silence them all, including the always-on lines below:
+
+```go
+avoinspector.SetLogOutput(logWriter) // any io.Writer; nil restores os.Stderr
+```
+
+Logs never include the API key or property values: a tracked event is logged with its schema (property names
 and types), so values such as email addresses stay out of your logs even when another inspector in
 the process turns logging on.
 
@@ -409,7 +416,8 @@ These are the behaviour changes you may notice:
   key containing a control character other than tab (such as a carriage return, line feed or NUL).
   The missing-version error message now reads "Many features of Inspector rely on versioning" (it
   was "Some features").
-- **Logs go to stderr.** All logs are written to stderr with an `[Avo Inspector] ` prefix. v1.0.0
+- **Logs go to stderr.** All logs are written to stderr (or the writer given to `SetLogOutput`)
+  with an `[Avo Inspector] ` prefix. v1.0.0
   wrote some to stdout and some through the standard `log` package. Dropped events, rejected
   batches, failed sends and internal errors are now logged even when logging is off, at most once
   per 10 seconds per kind. A tracked event is logged with its schema, not

@@ -931,11 +931,26 @@ func suppressedSuffix(suppressed int, seconds int64) string {
 	return fmt.Sprintf(" (%d more in the last %ds)", suppressed, seconds)
 }
 
-// logOutput receives every log line; tests swap it under logMu.
+// logOutput receives every log line; SetLogOutput and tests swap it under logMu.
 var (
 	logMu     sync.Mutex
 	logOutput io.Writer = os.Stderr
 )
+
+// SetLogOutput sets where every inspector in the process writes its log lines; like the logging
+// flag (EnableLogging, SPEC.md §4.4) it is process-wide. The default is os.Stderr, and a nil w
+// restores it. Use it to route the lines into the host's logger, or io.Discard to silence them,
+// including the always-on reports of dropped events, refused batches, failed sends and internal
+// errors. Writes are serialized, so w need not be safe for concurrent use, and write errors are
+// ignored.
+func SetLogOutput(w io.Writer) {
+	if w == nil {
+		w = os.Stderr
+	}
+	logMu.Lock()
+	logOutput = w
+	logMu.Unlock()
+}
 
 // Log helpers. None of them may be passed the apiKey (SPEC.md §7.5.1) or raw event property
 // values; log a schema with schemaForLog instead.
