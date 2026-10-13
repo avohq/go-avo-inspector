@@ -194,7 +194,7 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
 			// Send directly, bypassing the per-event sampling decision.
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -229,7 +229,7 @@ func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
 			})
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -264,7 +264,7 @@ func TestSamplingRate_200BodyOverReadLimitIsDeliveredAndIgnored(t *testing.T) {
 			newTestServer(t, respondWith(200, tc.body))
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent("E", "", 0.5, []Property{}, gatewayFields{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -735,14 +735,14 @@ func TestBatchTimer_ArmedOnlyWhilePending(t *testing.T) {
 	}
 }
 
-// A batch that has left the buffer but whose send has not started yet must already count as in
-// flight: Flush called in that window has to wait for it.
+// A batch that has left the buffer but whose request has not been posted yet must already count as
+// in flight: Flush called in that window has to wait for it.
 func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 1, DisableBatchTimer: true})
 	flushed := make(chan int, 1)
-	testHookBeforeSend = func() {
-		testHookBeforeSend = nil
+	testHookInSend = func() {
+		testHookInSend = nil
 		go func() {
 			_ = flushWithin(inspector, 5*time.Second)
 			flushed <- len(server.captured())
@@ -750,7 +750,7 @@ func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
 		// Hold the window open long enough for that Flush to run inside it.
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Cleanup(func() { testHookBeforeSend = nil })
+	t.Cleanup(func() { testHookInSend = nil })
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	if n := <-flushed; n != 1 {
 		t.Errorf("Flush returned before the taken batch was sent: %d requests captured", n)
@@ -1105,6 +1105,38 @@ func TestLogging_InternalErrorsAreRateLimited(t *testing.T) {
 	}
 }
 
+// Internal errors of different types are rate-limited separately, so a held count is never
+// reported under another type.
+func TestLogging_InternalErrorsAreRateLimitedPerType(t *testing.T) {
+	logs := captureLogs(t)
+	advance := fakeLogClock(t)
+	inspector := mustInspector(t, Options{Env: Staging, DisableBatchTimer: true})
+	inspector.EnableLogging(false)
+	previous := newGuid
+	t.Cleanup(func() { newGuid = previous })
+	newGuid = func() string { panic(errors.New("boom")) }
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
+	newGuid = func() string { panic("boom") }
+	for i := 0; i < 4; i++ {
+		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
+	}
+	advance(logRateWindow)
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
+	output := logs()
+	if !strings.Contains(output, "internal error: string\n") {
+		t.Errorf("expected the first string panic printed at once:\n%s", output)
+	}
+	if countLines(output, "internal error: *errors.errorString") != 1 {
+		t.Errorf("expected one *errors.errorString line:\n%s", output)
+	}
+	if !strings.Contains(output, "internal error: string (3 more in the last 10s)") {
+		t.Errorf("expected the held count reported under its own type:\n%s", output)
+	}
+	if strings.Contains(output, "errorString (") {
+		t.Errorf("a count was reported under the wrong type:\n%s", output)
+	}
+}
+
 // Sampling drops are not data loss the caller can act on: they stay behind the logging flag.
 func TestLogging_SamplingDropsAreSilentWhenLoggingIsOff(t *testing.T) {
 	logs := captureLogs(t)
@@ -1434,6 +1466,32 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 
 // An event with an empty or whitespace-only name is sent like any other, named
 // "Missing Event Name", and reported by an always-on, rate-limited line.
+// Names and gateway fields are trimmed with JavaScript's String.prototype.trim set, as in the Node
+// SDK: a stray BOM (U+FEFF) is whitespace, NEL (U+0085) is not.
+func TestTrack_TrimsLikeJavaScript(t *testing.T) {
+	if got := trimSpace("\ufeff \t\u2028x\u00a0\u3000"); got != "x" {
+		t.Errorf("trimSpace kept JavaScript whitespace: %q", got)
+	}
+	if got := trimSpace("\u0085x\u0085"); got != "\u0085x\u0085" {
+		t.Errorf("trimSpace trimmed NEL, which JavaScript keeps: %q", got)
+	}
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "\ufeff", OriginHint: "\ufeffweb ", OutputReference: "\u0085"})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "\u0085"})
+	requests := server.captured()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+	first, second := requests[0].events[0], requests[1].events[0]
+	if first["eventName"] != MissingEventName || first["originHint"] != "web" || first["outputReference"] != "\u0085" {
+		t.Errorf("unexpected first event %v", first)
+	}
+	if second["eventName"] != "\u0085" {
+		t.Errorf("expected a NEL name sent unchanged, got %q", second["eventName"])
+	}
+}
+
 func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 	for _, name := range []string{"", "  "} {
 		for _, env := range []AvoInspectorEnv{Dev, Staging, Prod} {
@@ -1562,46 +1620,6 @@ func TestLogging_DestroyReportsPendingCounts(t *testing.T) {
 	inspector.Destroy()
 	if !strings.Contains(logs(), "[Avo Inspector] schema sending failed: Request failed. (4 more in the last 2s)") {
 		t.Errorf("expected Destroy to report the 4 suppressed failures:\n%s", logs())
-	}
-}
-
-// A panic after a batch is registered in flight but before its sender starts cannot strand it:
-// the batch is finished and counted as dropped, its sender slot is freed, Flush returns at once,
-// and later batches still send.
-func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
-	logs := captureLogs(t)
-	fakeLogClock(t)
-	server := newTestServer(t, nil)
-	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2, DisableBatchTimer: true})
-	inspector.EnableLogging(false)
-	testHookBeforeSend = func() {
-		testHookBeforeSend = nil
-		panic("before launch")
-	}
-	t.Cleanup(func() { testHookBeforeSend = nil })
-
-	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Lost1"})
-	if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Lost2"}); err == nil || err.Error() != internalErrorMessage {
-		t.Fatalf("expected the internal error from the panicking call, got %v", err)
-	}
-	start := time.Now()
-	if err := flushWithin(inspector, 2*time.Second); err != nil || time.Since(start) > 500*time.Millisecond {
-		t.Errorf("Flush waited on the stranded batch: %v after %v", err, time.Since(start))
-	}
-	inspector.mu.Lock()
-	active, inFlight := inspector.activeSenders, len(inspector.inFlight)
-	inspector.mu.Unlock()
-	if active != 0 || inFlight != 0 {
-		t.Errorf("expected the slot and the in-flight entry released, got %d senders and %d entries", active, inFlight)
-	}
-	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later1"})
-	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later2"})
-	_ = flushWithin(inspector, 2*time.Second)
-	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
-		t.Errorf("expected only the later batch delivered, got %v", names)
-	}
-	if !strings.Contains(logs(), "dropped 2 event(s) (internal error) in the last 1s.") {
-		t.Errorf("expected the stranded batch counted as dropped:\n%s", logs())
 	}
 }
 
