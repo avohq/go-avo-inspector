@@ -337,7 +337,7 @@ func (inspector *AvoInspector) TrackSchemaFromEvent(event InspectorEvent) ([]Pro
 // track tracks event with the properties TrackSchemaFromEvent resolved from it.
 func (inspector *AvoInspector) track(event InspectorEvent, eventProperties interface{}) (schema []Property, err error) {
 	inspector.mu.Lock()
-	destroyed, samplingRate := inspector.destroyed, inspector.samplingRate
+	destroyed := inspector.destroyed
 	inspector.mu.Unlock()
 	if destroyed {
 		return []Property{}, nil
@@ -366,15 +366,13 @@ func (inspector *AvoInspector) track(event InspectorEvent, eventProperties inter
 		logf("supplied event %q with schema %s", event.EventName, schemaForLog(schema))
 	}
 
-	// SPEC.md §7.7: per-event sampling at enqueue.
-	if rand.Float64() > samplingRate {
+	batch, startSender, dropped, backlogDropped, outcome := inspector.enqueue(inspector.newWireEvent(event, schema))
+	switch outcome {
+	case destroyedBeforeEnqueue:
+		return []Property{}, nil
+	case sampledOut:
 		logIfEnabled("event %q dropped due to sampling rate.", event.EventName)
 		return schema, nil
-	}
-
-	batch, startSender, dropped, backlogDropped, queued := inspector.enqueue(inspector.newWireEvent(event, samplingRate, schema))
-	if !queued {
-		return []Property{}, nil
 	}
 	if dropped > 0 {
 		logDropped(dropped, "queue full")
@@ -396,16 +394,32 @@ func (inspector *AvoInspector) track(event InspectorEvent, eventProperties inter
 	return schema, nil
 }
 
-// enqueue appends event to the pending batch in one critical section: it drops the oldest pending
-// events past MaxQueueSize, and takes the batch when it is full, otherwise arms the flush timer. It
-// returns what takeBatch returned, how many pending events were dropped, and false when the
-// inspector is destroyed (nothing is queued). The caller logs and launches outside the lock.
-func (inspector *AvoInspector) enqueue(event wireEvent) (batch *queuedBatch, startSender bool, dropped, backlogDropped int, queued bool) {
+// enqueueOutcome is what enqueue did with an event.
+type enqueueOutcome int
+
+const (
+	enqueued enqueueOutcome = iota
+	sampledOut
+	destroyedBeforeEnqueue
+)
+
+// enqueue samples event and appends it to the pending batch in one critical section: it drops the
+// oldest pending events past MaxQueueSize, and takes the batch when it is full, otherwise arms the
+// flush timer. It returns what takeBatch returned, how many pending events were dropped, and what
+// it did with the event; only an enqueued event is queued. The caller logs and launches outside
+// the lock.
+func (inspector *AvoInspector) enqueue(event wireEvent) (batch *queuedBatch, startSender bool, dropped, backlogDropped int, outcome enqueueOutcome) {
 	inspector.mu.Lock()
 	defer inspector.mu.Unlock()
 	if inspector.destroyed {
-		return nil, false, 0, 0, false
+		return nil, false, 0, 0, destroyedBeforeEnqueue
 	}
+	// SPEC.md §7.7: per-event sampling at enqueue. The decision and the samplingRate on the wire use
+	// the rate in effect now, which a 200 may have changed since the call started.
+	if rand.Float64() > inspector.samplingRate {
+		return nil, false, 0, 0, sampledOut
+	}
+	event.SamplingRate = inspector.samplingRate
 	inspector.pending = append(inspector.pending, event)
 	for len(inspector.pending) > inspector.maxQueueSize {
 		inspector.pending = inspector.pending[1:]
@@ -416,12 +430,13 @@ func (inspector *AvoInspector) enqueue(event wireEvent) (batch *queuedBatch, sta
 	} else {
 		inspector.armFlushTimer()
 	}
-	return batch, startSender, dropped, backlogDropped, true
+	return batch, startSender, dropped, backlogDropped, enqueued
 }
 
 // newWireEvent builds the wire body of one event, resolving the gateway options (SPEC.md §7.3.6).
-// The event name has already been replaced by MissingEventName when blank.
-func (inspector *AvoInspector) newWireEvent(event InspectorEvent, samplingRate float64, schema []Property) wireEvent {
+// The event name has already been replaced by MissingEventName when blank, and enqueue sets the
+// samplingRate.
+func (inspector *AvoInspector) newWireEvent(event InspectorEvent, schema []Property) wireEvent {
 	outputReference := trimSpace(event.OutputReference)
 	originHint := trimSpace(event.OriginHint)
 	var appVersion *string
@@ -441,7 +456,6 @@ func (inspector *AvoInspector) newWireEvent(event InspectorEvent, samplingRate f
 		MessageId:       newGuid(),
 		StreamId:        event.StreamId,
 		CreatedAt:       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-		SamplingRate:    samplingRate,
 		Type:            "event",
 		EventName:       event.EventName,
 		OutputReference: outputReference,
@@ -927,8 +941,12 @@ var (
 // flag (EnableLogging, SPEC.md §4.4) it is process-wide. The default is os.Stderr, and a nil w
 // restores it. Use it to route the lines into the host's logger, or io.Discard to silence them,
 // including the always-on reports of dropped events, refused batches, failed sends and internal
-// errors. Writes are serialized, so w need not be safe for concurrent use, and write errors are
-// ignored.
+// errors. Writes are serialized, so w need not be safe for concurrent use; write errors are
+// ignored, and a write that panics loses its line.
+//
+// w is called with a process-wide lock held, from the caller's goroutines and the SDK's own:
+// while a write blocks, every SDK call that logs waits too, senders included. w must not call into
+// the SDK.
 func SetLogOutput(w io.Writer) {
 	if w == nil {
 		w = os.Stderr
@@ -944,6 +962,9 @@ func SetLogOutput(w io.Writer) {
 func logf(format string, args ...interface{}) {
 	logMu.Lock()
 	defer logMu.Unlock()
+	// The writer can be the caller's (SetLogOutput), called from the SDK's own goroutines: a panic
+	// in it loses the line, never the host process.
+	defer func() { _ = recover() }()
 	fmt.Fprintf(logOutput, logPrefix+format+"\n", args...)
 }
 

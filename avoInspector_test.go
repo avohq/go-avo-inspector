@@ -1,10 +1,12 @@
 package avoinspector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -194,7 +196,7 @@ func TestSamplingRate_UpdatedOnlyFromValid200Bodies(t *testing.T) {
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
 			// Send directly, bypassing the per-event sampling decision.
-			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -229,7 +231,7 @@ func TestSamplingRate_TruncatedBodyOf200IsDeliveredAndIgnored(t *testing.T) {
 			})
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -264,7 +266,7 @@ func TestSamplingRate_200BodyOverReadLimitIsDeliveredAndIgnored(t *testing.T) {
 			newTestServer(t, respondWith(200, tc.body))
 			inspector := mustInspector(t, Options{Env: Dev})
 			inspector.setSamplingRate(0.5)
-			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, 0.5, []Property{})
+			event := inspector.newWireEvent(InspectorEvent{EventName: "E"}, []Property{})
 			inspector.mu.Lock()
 			inspector.pending = []wireEvent{event}
 			batch, startSender, dropped := inspector.takeBatch()
@@ -305,6 +307,56 @@ func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 	if requests[0].events[0]["samplingRate"] != 1.0 || requests[0].events[1]["samplingRate"] != 0.999999 {
 		t.Errorf("expected per-event snapshots 1 and 0.999999, got %v and %v",
 			requests[0].events[0]["samplingRate"], requests[0].events[1]["samplingRate"])
+	}
+}
+
+// A 200 can change the rate while an event's schema is extracted. The sampling decision and the
+// samplingRate on the wire use the rate in effect when the event is enqueued, not the one when the
+// call started (SPEC.md §7.7). The log writer changes the rate between the two, on the "supplied
+// event" line.
+func TestTrack_SamplesWithTheRateInEffectAtEnqueue(t *testing.T) {
+	testCases := []struct {
+		name      string
+		start     float64
+		atEnqueue float64
+		sent      bool
+	}{
+		{"raised to 1 before enqueue", 0, 1, true},
+		{"lowered to 0 before enqueue", 1, 0, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetLogLimiter(t)
+			server := newTestServer(t, nil)
+			inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+			inspector.setSamplingRate(tc.start)
+			setLogOutputForTest(t, writerFunc(func(line []byte) {
+				if strings.Contains(string(line), "supplied event") {
+					inspector.setSamplingRate(tc.atEnqueue)
+				}
+			}))
+			inspector.EnableLogging(true)
+			t.Cleanup(func() { inspector.EnableLogging(false) })
+
+			schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"x": 1}})
+			if err != nil || len(schema) != 1 {
+				t.Fatalf("expected the schema whether the event is sampled in or out, got (%#v, %v)", schema, err)
+			}
+			_ = flushWithin(inspector, time.Second)
+			requests := server.captured()
+			if !tc.sent {
+				if len(requests) != 0 {
+					t.Errorf("expected the event sampled out by the rate at enqueue, got %d requests", len(requests))
+				}
+				return
+			}
+			if len(requests) != 1 || len(requests[0].events) != 1 {
+				t.Fatalf("expected the event sampled in by the rate at enqueue, got %d requests", len(requests))
+			}
+			if rate := requests[0].events[0]["samplingRate"]; rate != tc.atEnqueue {
+				t.Errorf("expected the wire samplingRate %v, the rate at enqueue, got %v", tc.atEnqueue, rate)
+			}
+		})
 	}
 }
 
@@ -513,20 +565,34 @@ func TestBatching_ConcurrentTracksAreSentExactlyOnce(t *testing.T) {
 	}
 }
 
-// captureLogs redirects log output for the rest of the test and returns a reader of it.
-func captureLogs(t *testing.T) func() string {
+// setLogOutputForTest routes log output to w for the rest of the test.
+func setLogOutputForTest(t *testing.T, w io.Writer) {
 	t.Helper()
-	resetLogLimiter(t)
-	buffer := &strings.Builder{}
 	logMu.Lock()
 	previous := logOutput
-	logOutput = buffer
+	logOutput = w
 	logMu.Unlock()
 	t.Cleanup(func() {
 		logMu.Lock()
 		logOutput = previous
 		logMu.Unlock()
 	})
+}
+
+// writerFunc is an io.Writer that hands every write to a function.
+type writerFunc func(p []byte)
+
+func (w writerFunc) Write(p []byte) (int, error) {
+	w(p)
+	return len(p), nil
+}
+
+// captureLogs redirects log output for the rest of the test and returns a reader of it.
+func captureLogs(t *testing.T) func() string {
+	t.Helper()
+	resetLogLimiter(t)
+	buffer := &strings.Builder{}
+	setLogOutputForTest(t, buffer)
 	return func() string {
 		logMu.Lock()
 		defer logMu.Unlock()
@@ -555,6 +621,34 @@ func TestSetLogOutput_RoutesAndRestores(t *testing.T) {
 	logMu.Unlock()
 	if restored != os.Stderr {
 		t.Errorf("expected SetLogOutput(nil) to restore os.Stderr, got %T", restored)
+	}
+}
+
+// The log writer can be the caller's (SetLogOutput), and the SDK calls it from its own goroutines,
+// where nothing else would recover a panic. A writer that panics loses its lines, never the
+// process, and tracking goes on: no internal error, and the batch is still sent.
+func TestSetLogOutput_PanickingWriterDoesNotCrash(t *testing.T) {
+	resetLogLimiter(t)
+	// A non-nil io.Writer holding a nil pointer passes SetLogOutput's nil check; every Write panics.
+	var broken *bytes.Buffer
+	SetLogOutput(broken)
+	t.Cleanup(func() { SetLogOutput(nil) })
+	server := newTestServer(t, respondWith(500, `{}`))
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 2})
+	inspector.EnableLogging(true)
+	t.Cleanup(func() { inspector.EnableLogging(false) })
+
+	for i := 0; i < 2; i++ {
+		schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"x": 1}})
+		if err != nil || len(schema) != 1 {
+			t.Fatalf("expected (schema, nil) with a panicking log writer, got (%#v, %v)", schema, err)
+		}
+	}
+	if err := flushWithin(inspector, 2*time.Second); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if n := len(server.captured()); n != 1 {
+		t.Errorf("expected the batch sent despite the panicking log writer, got %d requests", n)
 	}
 }
 

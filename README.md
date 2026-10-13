@@ -192,6 +192,9 @@ your own logger or to `io.Discard` to silence them all, including the always-on 
 avoinspector.SetLogOutput(logWriter) // any io.Writer; nil restores os.Stderr
 ```
 
+The writer is called under a process-wide lock, from your goroutines and the SDK's: keep it fast, and don't call
+the SDK from it. A write that panics loses its line and never crashes the process.
+
 Logs never include the API key or property values: a tracked event is logged with its schema (property names
 and types), so values such as email addresses stay out of your logs even when another inspector in
 the process turns logging on.
