@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,7 +390,7 @@ func runSequence(inspector *avoinspector.AvoInspector, steps []step) []stepRecor
 			records = append(records, stepRecord{"trackN", "resolve", s.count})
 		case "flush":
 			// The value is whether the flush drained: Flush returns nil, not ErrFlushTimeout.
-			records = append(records, stepRecord{"flush", "resolve", inspector.Flush(s.timeout) == nil})
+			records = append(records, stepRecord{"flush", "resolve", flush(inspector, s.timeout) == nil})
 		case "destroy":
 			inspector.Destroy()
 			records = append(records, stepRecord{"destroy", "resolve", nil})
@@ -589,4 +590,15 @@ func toFloat(value interface{}) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// flush runs Flush with the runner's timeoutMs: 0 starts the sends without waiting (an already
+// cancelled context), any other value waits at most that long.
+func flush(inspector *avoinspector.AvoInspector, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if timeout == 0 {
+		cancel()
+	}
+	return inspector.Flush(ctx)
 }

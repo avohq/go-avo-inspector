@@ -3,6 +3,7 @@ package avoinspector
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestMain points both the mock endpoint and the production endpoint at a closed local port, so no
@@ -108,4 +110,18 @@ func mustInspector(t *testing.T, options Options) *AvoInspector {
 	}
 	t.Cleanup(inspector.Destroy)
 	return inspector
+}
+
+// flushWithin flushes and waits at most timeout for the sends.
+func flushWithin(inspector *AvoInspector, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return inspector.Flush(ctx)
+}
+
+// cancelledContext is an already-cancelled context: Flush starts the sends without waiting.
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }

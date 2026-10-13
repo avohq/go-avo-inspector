@@ -32,7 +32,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() {
-		if err := inspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+		// A context without a deadline waits at most avoinspector.DefaultFlushTimeout (10 s).
+		if err := inspector.Flush(context.Background()); err != nil {
 			log.Print("Avo Inspector flush: ", err) // some events may not have been sent
 		}
 	}()
@@ -51,9 +52,11 @@ ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SI
 defer stop()
 
 go func() { _ = server.ListenAndServe() }()
-<-ctx.Done()                              // SIGTERM or Ctrl-C
-_ = server.Shutdown(context.Background()) // let in-flight requests finish tracking
-if err := inspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+<-ctx.Done() // SIGTERM or Ctrl-C
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+defer cancel()
+_ = server.Shutdown(shutdownCtx) // let in-flight requests finish tracking
+if err := inspector.Flush(shutdownCtx); err != nil {
 	log.Print("Avo Inspector flush: ", err) // some events may not have been sent
 }
 ```
@@ -138,7 +141,7 @@ for _, row := range rows {
 }
 drained := false
 for attempt := 0; attempt < 6 && !drained; attempt++ {
-	drained = avoInspector.Flush(avoinspector.DefaultFlushTimeout) == nil
+	drained = avoInspector.Flush(context.Background()) == nil
 }
 if !drained {
 	log.Print("Avo Inspector did not drain; waiting events may be dropped")
@@ -327,16 +330,17 @@ avoInspector.ExtractSchema(map[string]interface{}{"order": order})
 
 ## Flush and Destroy
 
-`Flush` sends the pending events and waits up to the given timeout for in-flight sends. Call it
-before the process exits (see [Shutdown](#shutdown)). It always completes, and its error says
-whether it drained the inspector: `nil` when, as `Flush` returns, nothing is buffered, waiting or in
-flight, and `ErrFlushTimeout` otherwise, such as when the timeout passed first. Either way the
+`Flush(ctx)` sends the pending events and waits for in-flight sends until `ctx` is done; a context
+without a deadline waits at most `DefaultFlushTimeout` (10 seconds). Call it before the process
+exits (see [Shutdown](#shutdown)). It always completes, and its error says whether it drained the
+inspector: `nil` when, as `Flush` returns, nothing is buffered, waiting or in flight, and
+`ErrFlushTimeout` otherwise, such as when `ctx` was done first. Either way the
 pending events are queued for sending and the inspector stays usable. `ErrFlushTimeout` does not
 mean they were sent: some may still be waiting or in flight, so before the process exits, flush
 again or accept that they may be lost. Otherwise you may ignore the error. Delivery failures are
-never reported. `Flush(0)` starts sending the pending events without waiting for them,
-so it returns `nil` only when there was nothing to send and nothing in flight; a negative timeout
-waits up to `DefaultFlushTimeout`. `Flush` on a destroyed inspector returns `nil`.
+never reported. With an already-cancelled context, `Flush` starts sending the pending events
+without waiting for them, so it returns `nil` only when there was nothing to send and nothing in
+flight. `Flush` on a destroyed inspector returns `nil`.
 
 `Destroy` discards pending events without sending them, abandons in-flight sends and stops the
 background flush. After `Destroy`, tracking calls send nothing. An idle inspector holds no goroutine
@@ -362,8 +366,9 @@ or timer, so one you stop using after a `Flush` is garbage-collected even withou
   })
   ```
 
-  It is the only tracking call. The constructors, `Flush` and the other v1.0.0 methods keep their
-  signatures, and every v1.0.0 type still exists.
+  It is the only tracking call. The constructors and the other v1.0.0 methods keep their
+  signatures, and every v1.0.0 type still exists. `Flush` is new in v2: call it before the
+  process exits, or buffered events are lost.
 - **`Property` gained a field.** `Property` adds `ListChildren`, so a positional `Property` literal
   with three values no longer compiles. Use field names in the literal, or add the fourth value.
 

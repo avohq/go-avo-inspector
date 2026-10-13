@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 
@@ -28,7 +29,8 @@ func main() {
 	defer func() {
 		// ErrFlushTimeout means Flush returned before all events were sent; those may not arrive
 		// once main returns. This example logs it and exits anyway.
-		if err := avoInspector.Flush(avoinspector.DefaultFlushTimeout); err != nil {
+		// A context without a deadline waits at most avoinspector.DefaultFlushTimeout.
+		if err := avoInspector.Flush(context.Background()); err != nil {
 			log.Print("Avo Inspector flush: ", err)
 		}
 	}()

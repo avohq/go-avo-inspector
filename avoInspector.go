@@ -61,13 +61,13 @@ const (
 // whitespace-only name.
 const MissingEventName = "Missing Event Name"
 
-// DefaultFlushTimeout is how long Flush waits for in-flight sends when given a negative timeout,
-// and a sensible value to pass before the process exits.
+// DefaultFlushTimeout is how long Flush waits for in-flight sends when its context has no deadline
+// (SPEC.md §4.6: Flush always completes).
 const DefaultFlushTimeout = 10 * time.Second
 
 // ErrFlushTimeout is returned by Flush when it did not drain the inspector: something was still
-// buffered, waiting or in flight as it returned, because the timeout passed or, for Flush(0),
-// because it does not wait. The pending events are still queued for sending and the instance stays
+// buffered, waiting or in flight as it returned, because its context was done first (its deadline
+// passed or it was cancelled, including before the call) or DefaultFlushTimeout passed. The pending events are still queued for sending and the instance stays
 // usable, but some may not have been sent yet: before the process exits, flush again or accept that
 // they may be lost. Otherwise callers may ignore it.
 var ErrFlushTimeout = errors.New("Avo Inspector: flush returned before all events were sent")
@@ -666,21 +666,26 @@ func (inspector *AvoInspector) send(batch *queuedBatch) {
 	close(batch.done)
 }
 
-// Flush sends every pending event and waits until all in-flight sends have completed, or until
-// timeout has passed. Flush(0) starts the sends without waiting; a negative timeout means
-// DefaultFlushTimeout (10 seconds). Flush always completes (SPEC.md §4.6), and its error reports
-// whether it drained the inspector: nil when, as Flush returns, nothing is buffered, waiting or in
-// flight, and ErrFlushTimeout otherwise, such as when Flush(0) leaves its sends in flight or the
-// timeout passes first. Either way the pending events are queued for sending and the inspector
-// stays usable; ErrFlushTimeout means some may not have been sent yet, and callers may otherwise
-// ignore it. Delivery failures are not reported. On a destroyed inspector Flush
-// returns nil. Call Flush before the process or serverless handler exits: pending events are
-// otherwise lost.
-func (inspector *AvoInspector) Flush(timeout time.Duration) error {
+// Flush sends every pending event and waits until all in-flight sends have completed, or until ctx
+// is done. A ctx without a deadline waits at most DefaultFlushTimeout (10 seconds), so Flush always
+// completes (SPEC.md §4.6); a nil ctx is treated as context.Background(). An already-cancelled ctx
+// starts the sends without waiting for them. The error reports whether Flush drained the
+// inspector: nil when, as Flush returns, nothing is buffered, waiting or in flight, and
+// ErrFlushTimeout otherwise, such as when ctx is done first. Either way the pending events are
+// queued for sending and the inspector stays usable; ErrFlushTimeout means some may not have been
+// sent yet, and callers may otherwise ignore it. Delivery failures are not reported. On a destroyed
+// inspector Flush returns nil. Call Flush before the process or serverless handler exits, for
+// example with the context passed to http.Server.Shutdown: pending events are otherwise lost.
+func (inspector *AvoInspector) Flush(ctx context.Context) error {
 	// Report held log counts whose window has expired, after the sends this call waited for.
 	defer flushLogCounts(true)
-	if timeout < 0 {
-		timeout = DefaultFlushTimeout
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultFlushTimeout)
+		defer cancel()
 	}
 	inspector.mu.Lock()
 	if inspector.destroyed {
@@ -698,22 +703,16 @@ func (inspector *AvoInspector) Flush(timeout time.Duration) error {
 		inspector.launch(batch, startSender, dropped)
 	}
 
-	deadline := time.Now().Add(timeout)
 	for _, done := range waiting {
+		// A send that already completed counts even when ctx is done too.
 		select {
 		case <-done:
 			continue
 		default:
 		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return ErrFlushTimeout
-		}
-		timer := time.NewTimer(remaining)
 		select {
 		case <-done:
-			timer.Stop()
-		case <-timer.C:
+		case <-ctx.Done():
 			return ErrFlushTimeout
 		}
 	}

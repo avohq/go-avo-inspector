@@ -162,7 +162,7 @@ func TestTrack_SamplingRateZeroDropsWithoutSending(t *testing.T) {
 			t.Fatalf("sampled-out event must still return its schema, got (%#v, %v)", schema, err)
 		}
 	}
-	_ = inspector.Flush(time.Second)
+	_ = flushWithin(inspector, time.Second)
 	if n := len(server.captured()); n != 0 {
 		t.Errorf("expected no requests at samplingRate 0, got %d", n)
 	}
@@ -296,7 +296,7 @@ func TestTrack_BodyCarriesSamplingRateAtEnqueue(t *testing.T) {
 		}
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2"})
 	}
-	_ = inspector.Flush(time.Second)
+	_ = flushWithin(inspector, time.Second)
 	requests := server.captured()
 	if len(requests) != 1 || len(requests[0].events) != 2 {
 		t.Fatalf("expected one batch of two events, got %d requests", len(requests))
@@ -316,7 +316,7 @@ func TestBatching_SizeTriggerAndFlush(t *testing.T) {
 			t.Fatalf("track %d: unexpected (%#v, %v)", i, schema, err)
 		}
 	}
-	if err := inspector.Flush(time.Second); err != nil {
+	if err := flushWithin(inspector, time.Second); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 	requests := server.captured()
@@ -335,7 +335,7 @@ func TestBatching_MaxQueueSizeDropsOldest(t *testing.T) {
 	for _, name := range []string{"E1", "E2", "E3"} {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
-	_ = inspector.Flush(time.Second)
+	_ = flushWithin(inspector, time.Second)
 	requests := server.captured()
 	if len(requests) != 1 || !reflect.DeepEqual(eventNames(requests[0]), []string{"E2", "E3"}) {
 		t.Errorf("expected one batch [E2 E3], got %v", requests)
@@ -385,12 +385,12 @@ func TestBatching_TransientFailureDropsBatch(t *testing.T) {
 	for _, name := range []string{"E1", "E2"} {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
-	_ = inspector.Flush(time.Second)
+	_ = flushWithin(inspector, time.Second)
 	for _, name := range []string{"E3", "E4"} {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: name})
 	}
-	_ = inspector.Flush(time.Second)
-	_ = inspector.Flush(time.Second)
+	_ = flushWithin(inspector, time.Second)
+	_ = flushWithin(inspector, time.Second)
 
 	requests := server.captured()
 	if len(requests) != 2 {
@@ -412,7 +412,7 @@ func TestDestroy_DiscardsPendingAndStopsTracking(t *testing.T) {
 	if err != nil || schema == nil || len(schema) != 0 {
 		t.Errorf("after Destroy expected ([], nil), got (%#v, %v)", schema, err)
 	}
-	if err := inspector.Flush(time.Second); err != nil {
+	if err := flushWithin(inspector, time.Second); err != nil {
 		t.Errorf("flush after destroy: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -436,7 +436,7 @@ func TestFlush_TimesOutOnHungSend(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	start := time.Now()
-	if err := inspector.Flush(50 * time.Millisecond); err != ErrFlushTimeout {
+	if err := flushWithin(inspector, 50*time.Millisecond); err != ErrFlushTimeout {
 		t.Errorf("expected ErrFlushTimeout, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -444,6 +444,40 @@ func TestFlush_TimesOutOnHungSend(t *testing.T) {
 	}
 	// The instance stays usable after a flush.
 	inspector.Destroy()
+}
+
+// Cancelling the context while Flush waits returns ErrFlushTimeout promptly; the hung send is not
+// waited for.
+func TestFlush_ReturnsWhenContextIsCancelledWhileWaiting(t *testing.T) {
+	release := make(chan struct{})
+	newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
+	defer close(release)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	if err := inspector.Flush(ctx); err != ErrFlushTimeout {
+		t.Errorf("expected ErrFlushTimeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("flush did not return on cancellation: %v", elapsed)
+	}
+	inspector.Destroy()
+}
+
+// A nil context is treated as context.Background(): Flush still sends and drains.
+func TestFlush_NilContextDrains(t *testing.T) {
+	server := newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
+	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
+	//nolint:staticcheck // SA1012: a nil context is exactly what this test passes.
+	if err := inspector.Flush(nil); err != nil {
+		t.Errorf("expected Flush(nil) to drain, got %v", err)
+	}
+	if got := len(server.captured()); got != 1 {
+		t.Errorf("expected 1 request sent, got %d", got)
+	}
 }
 
 // SPEC.md §3.1, §12.4: concurrent enqueue and flush lose and duplicate nothing.
@@ -458,12 +492,12 @@ func TestBatching_ConcurrentTracksAreSentExactlyOnce(t *testing.T) {
 			defer wg.Done()
 			_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("C%d", i)})
 			if i%50 == 0 {
-				_ = inspector.Flush(time.Second)
+				_ = flushWithin(inspector, time.Second)
 			}
 		}(i)
 	}
 	wg.Wait()
-	_ = inspector.Flush(5 * time.Second)
+	_ = flushWithin(inspector, 5*time.Second)
 
 	seen := map[string]bool{}
 	total := 0
@@ -533,7 +567,7 @@ func TestLogging_FailuresAreLoggedWhenLoggingIsOff(t *testing.T) {
 			inspector := newQuietInspector(t)
 			tc.setup(t, inspector)
 			_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
-			_ = inspector.Flush(2 * time.Second)
+			_ = flushWithin(inspector, 2*time.Second)
 			output := logs()
 			if !strings.Contains(output, tc.expected) {
 				t.Errorf("expected a log containing %q, got %q", tc.expected, output)
@@ -571,7 +605,7 @@ func TestFlush_ZeroSendsWithoutWaiting(t *testing.T) {
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
 	start := time.Now()
 	// The send it started is still in flight, so the instance was not drained.
-	if err := inspector.Flush(0); err != ErrFlushTimeout {
+	if err := inspector.Flush(cancelledContext()); err != ErrFlushTimeout {
 		t.Errorf("expected ErrFlushTimeout from Flush(0) while the send is still in flight, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
@@ -590,7 +624,7 @@ func TestFlush_NegativeWaitsForInFlightSends(t *testing.T) {
 	server := newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
-	if err := inspector.Flush(-1); err != nil {
+	if err := inspector.Flush(context.Background()); err != nil {
 		t.Errorf("expected nil, got %v", err)
 	}
 	if n := len(server.captured()); n != 1 {
@@ -609,7 +643,7 @@ func TestBatchTimer_IdleInspectorHoldsNoGoroutine(t *testing.T) {
 	if n := runtime.NumGoroutine(); n > baseline {
 		t.Errorf("an armed flush timer must not hold a goroutine: %d goroutines, baseline %d", n, baseline)
 	}
-	_ = inspector.Flush(2 * time.Second)
+	_ = flushWithin(inspector, 2*time.Second)
 	deadline := time.Now().Add(2 * time.Second)
 	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -630,7 +664,7 @@ func TestBatchTimer_DroppedInspectorIsCollected(t *testing.T) {
 		}
 		inspector.EnableLogging(false)
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
-		_ = inspector.Flush(2 * time.Second)
+		_ = flushWithin(inspector, 2*time.Second)
 		runtime.SetFinalizer(inspector, func(*AvoInspector) { close(collected) })
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -667,7 +701,7 @@ func TestBatchTimer_ArmedOnlyWhilePending(t *testing.T) {
 		t.Errorf("timer still armed after the size trigger")
 	}
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E3"})
-	_ = inspector.Flush(2 * time.Second)
+	_ = flushWithin(inspector, 2*time.Second)
 	if armed() {
 		t.Errorf("timer still armed after Flush")
 	}
@@ -685,7 +719,7 @@ func TestFlush_WaitsForBatchTakenButNotYetSent(t *testing.T) {
 	testHookBeforeSend = func() {
 		testHookBeforeSend = nil
 		go func() {
-			_ = inspector.Flush(5 * time.Second)
+			_ = flushWithin(inspector, 5*time.Second)
 			flushed <- len(server.captured())
 		}()
 		// Hold the window open long enough for that Flush to run inside it.
@@ -792,7 +826,7 @@ func TestDestroy_AbandonedSendIsNotLogged(t *testing.T) {
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
 	inspector.EnableLogging(false)
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
-	_ = inspector.Flush(0)
+	_ = inspector.Flush(cancelledContext())
 	inspector.mu.Lock()
 	var sends []chan struct{}
 	for _, done := range inspector.inFlight {
@@ -859,10 +893,10 @@ func TestLogging_NeverShowsPropertyValues(t *testing.T) {
 	staging.EnableLogging(true)
 	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties, StreamId: "s:1", OriginHint: "web"})
 	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties})
-	_ = staging.Flush(2 * time.Second)
+	_ = flushWithin(staging, 2*time.Second)
 	server.Close()
 	_, _ = staging.TrackSchemaFromEvent(InspectorEvent{EventName: "Signed Up", EventProperties: properties})
-	_ = staging.Flush(2 * time.Second)
+	_ = flushWithin(staging, 2*time.Second)
 
 	output := logs()
 	for _, secret := range []string{marker, apiKey} {
@@ -1171,7 +1205,7 @@ func TestSendModel_AtMostFourSendsAtOnce(t *testing.T) {
 		t.Errorf("expected 4 requests in progress at once, got %d", got)
 	}
 	release()
-	_ = inspector.Flush(5 * time.Second)
+	_ = flushWithin(inspector, 5*time.Second)
 	if n := len(deliveredNames(server)); n != 100 {
 		t.Errorf("expected all 100 events delivered, got %d", n)
 	}
@@ -1187,7 +1221,7 @@ func TestSendModel_BurstWithinAllowanceIsDelivered(t *testing.T) {
 	for i := 0; i < 9000; i++ {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"})
 	}
-	_ = inspector.Flush(10 * time.Second)
+	_ = flushWithin(inspector, 10*time.Second)
 	if n := len(deliveredNames(server)); n != 9000 {
 		t.Errorf("expected 9000 events delivered, got %d", n)
 	}
@@ -1214,7 +1248,7 @@ func TestSendModel_BacklogKeepsNewestEvents(t *testing.T) {
 	release()
 	// Past the drop line's window, so Flush reports the drops held since.
 	advance(logRateWindow)
-	_ = inspector.Flush(10 * time.Second)
+	_ = flushWithin(inspector, 10*time.Second)
 
 	expected := map[string]bool{}
 	for i := 0; i < 4*30; i++ {
@@ -1341,13 +1375,13 @@ func TestSendModel_PanicInSendIsRecovered(t *testing.T) {
 	for i := 0; i < 2*(maxConcurrentSends+1); i++ {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: fmt.Sprintf("Lost%d", i)})
 	}
-	if err := inspector.Flush(2 * time.Second); err != nil {
+	if err := flushWithin(inspector, 2*time.Second); err != nil {
 		t.Fatalf("Flush after panicking sends: %v", err)
 	}
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later1"})
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later2"})
 	advance(logRateWindow)
-	if err := inspector.Flush(2 * time.Second); err != nil {
+	if err := flushWithin(inspector, 2*time.Second); err != nil {
 		t.Fatalf("Flush after recovery: %v", err)
 	}
 	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
@@ -1393,7 +1427,7 @@ func TestTrack_BlankEventNameIsSentAsMissingEventName(t *testing.T) {
 				if err != nil || len(schema) != 1 || schema[0].PropertyName != "a" || schema[0].PropertyType != "int" {
 					t.Errorf("expected the extracted schema and no error, got (%#v, %v)", schema, err)
 				}
-				_ = inspector.Flush(time.Second)
+				_ = flushWithin(inspector, time.Second)
 				requests := server.captured()
 				if len(requests) != 1 || requests[0].events[0]["eventName"] != "Missing Event Name" {
 					t.Fatalf("expected one event named \"Missing Event Name\", got %v", requests)
@@ -1439,12 +1473,12 @@ func TestLogging_FlushReportsPendingCountsAfterTheWindow(t *testing.T) {
 		t.Fatalf("expected the first drop printed at once:\n%s", logs())
 	}
 	advance(3 * time.Second)
-	_ = inspector.Flush(0)
+	_ = inspector.Flush(cancelledContext())
 	if n := countLines(logs(), "(queue full)"); n != 1 {
 		t.Fatalf("Flush inside the window must keep the count pending, got %d lines:\n%s", n, logs())
 	}
 	advance(logRateWindow)
-	_ = inspector.Flush(0)
+	_ = inspector.Flush(cancelledContext())
 	if !strings.Contains(logs(), "[Avo Inspector] dropped 7 event(s) (queue full) in the last 13s.") {
 		t.Errorf("expected Flush after the window to report the 7 held drops over 13s:\n%s", logs())
 	}
@@ -1453,7 +1487,7 @@ func TestLogging_FlushReportsPendingCountsAfterTheWindow(t *testing.T) {
 	}
 	// The count was reset: another Flush prints nothing more.
 	before := logs()
-	_ = inspector.Flush(0)
+	_ = inspector.Flush(cancelledContext())
 	if logs() != before {
 		t.Errorf("a second Flush printed again:\n%s", logs())
 	}
@@ -1528,7 +1562,7 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 		t.Fatalf("expected the internal error from the panicking call, got %v", err)
 	}
 	start := time.Now()
-	if err := inspector.Flush(2 * time.Second); err != nil || time.Since(start) > 500*time.Millisecond {
+	if err := flushWithin(inspector, 2*time.Second); err != nil || time.Since(start) > 500*time.Millisecond {
 		t.Errorf("Flush waited on the stranded batch: %v after %v", err, time.Since(start))
 	}
 	inspector.mu.Lock()
@@ -1539,7 +1573,7 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 	}
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later1"})
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Later2"})
-	_ = inspector.Flush(2 * time.Second)
+	_ = flushWithin(inspector, 2*time.Second)
 	if names := deliveredNames(server); !reflect.DeepEqual(names, []string{"Later1", "Later2"}) {
 		t.Errorf("expected only the later batch delivered, got %v", names)
 	}
@@ -1553,19 +1587,19 @@ func TestSendModel_PanicBeforeLaunchDoesNotStrandTheBatch(t *testing.T) {
 func TestFlush_NilMeansDrained(t *testing.T) {
 	newTestServer(t, nil)
 	inspector := mustInspector(t, Options{Env: Staging, BatchSize: 30, DisableBatchTimer: true})
-	if err := inspector.Flush(0); err != nil {
+	if err := inspector.Flush(cancelledContext()); err != nil {
 		t.Errorf("Flush(0) on an empty instance: expected nil, got %v", err)
 	}
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E1"})
-	if err := inspector.Flush(2 * time.Second); err != nil {
+	if err := flushWithin(inspector, 2*time.Second); err != nil {
 		t.Errorf("Flush that waited for its send: expected nil, got %v", err)
 	}
-	if err := inspector.Flush(0); err != nil {
+	if err := inspector.Flush(cancelledContext()); err != nil {
 		t.Errorf("Flush(0) once drained: expected nil, got %v", err)
 	}
 	_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E2"})
 	inspector.Destroy()
-	if err := inspector.Flush(0); err != nil {
+	if err := inspector.Flush(cancelledContext()); err != nil {
 		t.Errorf("Flush on a destroyed instance: expected nil, got %v", err)
 	}
 }
@@ -1586,7 +1620,7 @@ func TestTrack_ReturnedSchemaIsACopy(t *testing.T) {
 	schema[1].ListChildren[2].([]interface{})[0] = "MUTATED"
 	schema[2].Children[0].Children[0].PropertyType = "MUTATED"
 	schema[2].Children = append(schema[2].Children[:0], Property{PropertyName: "MUTATED"})
-	_ = inspector.Flush(2 * time.Second)
+	_ = flushWithin(inspector, 2*time.Second)
 	sent, _ := json.Marshal(server.captured()[0].events[0]["eventProperties"])
 	if strings.Contains(string(sent), "MUTATED") {
 		t.Errorf("changing the returned schema changed the queued event: %s", sent)
@@ -1619,7 +1653,7 @@ func TestBackpressure_TightLoopDeliversEverything(t *testing.T) {
 	for i := 0; i < 20000; i++ {
 		_, _ = inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "Loop"})
 	}
-	_ = inspector.Flush(30 * time.Second)
+	_ = flushWithin(inspector, 30*time.Second)
 	if n := deliveredCount(server); n != 20000 {
 		t.Errorf("expected 20000 delivered, got %d", n)
 	}
@@ -1645,7 +1679,7 @@ func TestBackpressure_ConcurrentTrackers(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	_ = inspector.Flush(30 * time.Second)
+	_ = flushWithin(inspector, 30*time.Second)
 	if n := deliveredCount(server); n != 12000 {
 		t.Errorf("expected 12000 delivered, got %d", n)
 	}
