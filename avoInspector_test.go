@@ -820,7 +820,7 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
 			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
-		result := newNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler(apiKey, Dev, nil).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}
@@ -882,7 +882,7 @@ func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
 		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
 			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
-		result := newNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler(apiKey, Dev, nil).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}

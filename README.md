@@ -100,6 +100,13 @@ avoInspector, err := avoinspector.NewAvoInspectorWithOptions(avoinspector.Option
 })
 ```
 
+Requests go through one transport shared by every inspector, built from `http.DefaultTransport` when
+the first inspector is constructed, so a proxy, root CA or tracing wrapper you set on
+`http.DefaultTransport` before that is used. To send through your own client instead, for a proxy,
+tracing or a test double, set `Options.HTTPClient`. The SDK uses a copy of it and keeps its own
+limits on the copy: a request timeout of at most 10 seconds, and no redirects, since a redirect would
+carry the API key to another host.
+
 A zero `BatchSize`, `BatchFlushSeconds` or `MaxQueueSize` means "use the default", without a warning.
 A negative value is invalid: it logs a warning and the default is used. `BatchFlushSeconds` above
 86400 (24 hours) is capped at 86400 with a warning.

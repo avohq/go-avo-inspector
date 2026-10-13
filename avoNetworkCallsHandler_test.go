@@ -111,7 +111,7 @@ func TestWire_GzipAtThreshold(t *testing.T) {
 
 // The threshold is on the serialized byte length: 1023 bytes stays plain, 1024 is compressed.
 func TestWire_GzipThresholdBoundary(t *testing.T) {
-	handler := newNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev, nil)
 	for _, size := range []int{1023, 1024} {
 		server := newTestServer(t, nil)
 		event := wireEvent{EventProperties: []Property{}}
@@ -148,7 +148,7 @@ func TestWire_GzipIsRFC1952(t *testing.T) {
 func TestWire_HeaderControlCharacterGuard(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\r\nX-Injected: 1", "key\n", "ke\x00y"} {
-		handler := newNetworkCallsHandler(apiKey, Dev)
+		handler := newNetworkCallsHandler(apiKey, Dev, nil)
 		result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if result.status != sendFailed || !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: expected errUnsafeHeader, got %v (%v)", apiKey, result.status, result.err)
@@ -208,14 +208,14 @@ func TestWire_MockEndpointIgnoredInProd(t *testing.T) {
 	if productionEndpoint != "https://api.avo.app/inspector/v2/track" {
 		t.Errorf("unexpected production endpoint %q", productionEndpoint)
 	}
-	if got := newNetworkCallsHandler("k", Prod).endpoint(); got != trackingEndpoint {
+	if got := newNetworkCallsHandler("k", Prod, nil).endpoint(); got != trackingEndpoint {
 		t.Errorf("prod must ignore the mock endpoint, got %q", got)
 	}
-	if got := newNetworkCallsHandler("k", Staging).endpoint(); got != "http://attacker.example" {
+	if got := newNetworkCallsHandler("k", Staging, nil).endpoint(); got != "http://attacker.example" {
 		t.Errorf("staging must honor the mock endpoint, got %q", got)
 	}
 	t.Setenv(mockEndpointEnvVar, "")
-	if got := newNetworkCallsHandler("k", Dev).endpoint(); got != trackingEndpoint {
+	if got := newNetworkCallsHandler("k", Dev, nil).endpoint(); got != trackingEndpoint {
 		t.Errorf("expected the v2 endpoint by default, got %q", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestWire_RequestTimeout(t *testing.T) {
 	release := make(chan struct{})
 	newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
 	defer close(release)
-	handler := newNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev, nil)
 	handler.client.Timeout = 50 * time.Millisecond
 	result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 	if result.status != sendFailed || !errors.Is(result.err, errRequestTimeout) {
@@ -250,7 +250,7 @@ func TestWire_RedirectIsNotFollowed(t *testing.T) {
 		newTestServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, other.URL, status)
 		})
-		result := newNetworkCallsHandler("secret-key", Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler("secret-key", Dev, nil).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if result.status != sendNon200 {
 			t.Errorf("%d: expected a non-200 result, got %v (%v)", status, result.status, result.err)
 		}
@@ -293,7 +293,7 @@ func TestWire_ConcurrentSendsReuseTheirConnections(t *testing.T) {
 	server.Start()
 	defer server.Close()
 	t.Setenv(mockEndpointEnvVar, server.URL)
-	handler := newNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev, nil)
 	for round := 0; round < 3; round++ {
 		var wg sync.WaitGroup
 		for i := 0; i < maxConcurrentSends; i++ {
@@ -326,5 +326,76 @@ func TestWire_TransportToleratesAReplacedDefaultTransport(t *testing.T) {
 	cloned, ok := newTransport(base).(*http.Transport)
 	if !ok || cloned == base || cloned.MaxIdleConnsPerHost != maxConcurrentSends || base.MaxIdleConnsPerHost != 1 {
 		t.Errorf("expected a clone with MaxIdleConnsPerHost %d and the original unchanged, got %+v", maxConcurrentSends, cloned)
+	}
+}
+
+// countingTransport counts the requests it carries.
+type countingTransport struct {
+	base     http.RoundTripper
+	requests atomic.Int32
+}
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.requests.Add(1)
+	return c.base.RoundTrip(r)
+}
+
+// The shared transport is built when the first inspector is constructed, not at package init, so
+// a change main makes to http.DefaultTransport before that is honored.
+func TestWire_SharedTransportIsBuiltLazily(t *testing.T) {
+	original := http.DefaultTransport
+	counting := &countingTransport{base: original}
+	http.DefaultTransport = counting
+	transportOnce, transport = &sync.Once{}, nil
+	t.Cleanup(func() {
+		http.DefaultTransport = original
+		transportOnce, transport = &sync.Once{}, nil
+	})
+	newTestServer(t, nil)
+	inspector := mustInspector(t, Options{Env: Dev})
+	if _, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E"}); err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	if got := counting.requests.Load(); got != 1 {
+		t.Errorf("expected the send to use the http.DefaultTransport set before construction, got %d requests through it", got)
+	}
+}
+
+// Options.HTTPClient sends the requests, but on a copy that keeps the SDK's limits: a timeout of at
+// most 10 seconds and no redirects. The caller's client is not modified.
+func TestWire_HTTPClientOptionKeepsTheSDKLimits(t *testing.T) {
+	redirected := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the redirect was followed")
+	}))
+	defer redirected.Close()
+	newTestServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirected.URL, http.StatusFound)
+	})
+	counting := &countingTransport{base: http.DefaultTransport}
+	follow := func(*http.Request, []*http.Request) error { return nil }
+	base := &http.Client{Transport: counting, Timeout: time.Hour, CheckRedirect: follow}
+
+	inspector := mustInspector(t, Options{Env: Dev, HTTPClient: base})
+	client := inspector.avoNetworkCallsHandler.client
+	if client == base || client.Timeout != requestTimeout {
+		t.Errorf("expected a copy with timeout %v, got same=%v timeout %v", requestTimeout, client == base, client.Timeout)
+	}
+	if base.Timeout != time.Hour || base.CheckRedirect == nil {
+		t.Errorf("the caller's client was modified: %+v", base)
+	}
+	schema, err := inspector.TrackSchemaFromEvent(InspectorEvent{EventName: "E", EventProperties: map[string]interface{}{"a": 1}})
+	if err != nil || len(schema) != 0 {
+		t.Errorf("expected the unfollowed 302 to count as non-200 (empty schema), got %v, %v", schema, err)
+	}
+	if got := counting.requests.Load(); got != 1 {
+		t.Errorf("expected 1 request through the given client's transport, got %d", got)
+	}
+
+	shorter := mustInspector(t, Options{Env: Dev, HTTPClient: &http.Client{Timeout: time.Second}})
+	if got := shorter.avoNetworkCallsHandler.client.Timeout; got != time.Second {
+		t.Errorf("expected a shorter timeout to be kept, got %v", got)
+	}
+	if shorter.avoNetworkCallsHandler.client.Transport == nil {
+		t.Errorf("expected a nil Transport to fall back to the shared transport")
 	}
 }

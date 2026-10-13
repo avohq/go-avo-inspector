@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -94,11 +95,24 @@ type networkCallsHandler struct {
 	client *http.Client
 }
 
-// transport is shared by every inspector. It is http.DefaultTransport with room for an idle
-// connection per concurrent sender: the default keeps 2 per host, so each round of 4 sends would
-// reconnect twice. One shared pool, rather than one per inspector, means an inspector dropped
-// without Destroy leaves no connections of its own behind.
-var transport = newTransport(http.DefaultTransport)
+// sharedTransport is shared by every inspector that is not given an Options.HTTPClient with its
+// own Transport. It is http.DefaultTransport with room for an idle connection per concurrent
+// sender: the default keeps 2 per host, so each round of 4 sends would reconnect twice. One shared
+// pool, rather than one per inspector, means an inspector dropped without Destroy leaves no
+// connections of its own behind. It is built when the first inspector is constructed, not at
+// package init, so changes main makes to http.DefaultTransport before that (a proxy, a root CA, a
+// tracing wrapper, httpmock) are honored.
+func sharedTransport() http.RoundTripper {
+	transportOnce.Do(func() { transport = newTransport(http.DefaultTransport) })
+	return transport
+}
+
+// transport is built once by sharedTransport; transportOnce is a variable only so tests can
+// rebuild it.
+var (
+	transportOnce = &sync.Once{}
+	transport     http.RoundTripper
+)
 
 // newTransport clones base with an idle connection per concurrent sender. A base that is not an
 // *http.Transport, such as a default transport an APM or tracing library replaced with a wrapper,
@@ -113,18 +127,24 @@ func newTransport(base http.RoundTripper) http.RoundTripper {
 	return t
 }
 
-func newNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *networkCallsHandler {
-	return &networkCallsHandler{
-		apiKey: apiKey,
-		env:    env,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   requestTimeout,
-			// Never follow a redirect: it would carry the api-key header to another host. The
-			// 3xx is returned as is and handled as a non-200.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+// newNetworkCallsHandler builds the handler's client from base (Options.HTTPClient), or from the
+// shared transport when base is nil. base is copied, never modified, and the copy always gets the
+// SDK's limits: a timeout of at most requestTimeout, and no redirects.
+func newNetworkCallsHandler(apiKey string, env AvoInspectorEnv, base *http.Client) *networkCallsHandler {
+	client := &http.Client{}
+	if base != nil {
+		*client = *base
 	}
+	if client.Transport == nil {
+		client.Transport = sharedTransport()
+	}
+	if client.Timeout <= 0 || client.Timeout > requestTimeout {
+		client.Timeout = requestTimeout
+	}
+	// Never follow a redirect: it would carry the api-key header to another host. The 3xx is
+	// returned as is and handled as a non-200.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &networkCallsHandler{apiKey: apiKey, env: env, client: client}
 }
 
 // endpoint resolves the request URL. AVO_INSPECTOR_MOCK_ENDPOINT is honored only for non-prod

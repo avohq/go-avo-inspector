@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -110,6 +111,12 @@ type Options struct {
 	// drop is logged. Do not set it for request handlers in a server: they would then wait
 	// whenever the Inspector API is slow.
 	BlockWhenBacklogged bool
+	// HTTPClient, when set, sends the requests, for a proxy, tracing or a test double. The SDK
+	// uses a copy of it and keeps its own limits on the copy: a request timeout of at most 10
+	// seconds, and no redirects (a redirect would carry the api-key header to another host). A
+	// nil Transport means the SDK's shared transport. Default nil: the shared transport, built
+	// from http.DefaultTransport when the first inspector is constructed.
+	HTTPClient *http.Client
 }
 
 // InspectorEvent is one tracked event, the single argument of TrackSchemaFromEvent. Every field
@@ -262,7 +269,7 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		environment:            env,
 		version:                options.AppVersion,
 		appName:                options.AppName,
-		avoNetworkCallsHandler: newNetworkCallsHandler(options.ApiKey, env),
+		avoNetworkCallsHandler: newNetworkCallsHandler(options.ApiKey, env, options.HTTPClient),
 		batchSize:              batchSize,
 		batchFlushSeconds:      batchFlushSeconds,
 		maxQueueSize:           maxQueueSize,
