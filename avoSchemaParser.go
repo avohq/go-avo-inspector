@@ -219,10 +219,7 @@ func classify(value interface{}) valueKind {
 	case float32, float64:
 		return kindFloat
 	case json.Number:
-		if strings.ContainsAny(string(v), ".eE") {
-			return kindFloat
-		}
-		return kindInt
+		return jsonNumberKind(v)
 	case OrderedMap:
 		if v == nil {
 			return kindNull
@@ -240,11 +237,19 @@ func classify(value interface{}) valueKind {
 		return kindList
 	}
 	rv := reflect.ValueOf(value)
-	for rv.Kind() == reflect.Ptr {
+	for depth := 0; rv.Kind() == reflect.Ptr; depth++ {
 		if rv.IsNil() {
 			return kindNull
 		}
+		if depth == maxPointerDepth {
+			// A recursive pointer type (type P *P; p = &p) dereferences to itself forever.
+			return kindUnknown
+		}
 		rv = rv.Elem()
+	}
+	if rv.Type() == jsonNumberType {
+		// A *json.Number is typed by its text, like a bare json.Number.
+		return jsonNumberKind(json.Number(rv.String()))
 	}
 	if kind := scalarKind(rv.Kind()); kind != kindUnknown {
 		return kind
@@ -271,6 +276,18 @@ func classify(value interface{}) valueKind {
 	}
 	return kindUnknown
 }
+
+// jsonNumberKind types a json.Number by its text: "float" when it has a fraction or exponent.
+func jsonNumberKind(number json.Number) valueKind {
+	if strings.ContainsAny(string(number), ".eE") {
+		return kindFloat
+	}
+	return kindInt
+}
+
+// maxPointerDepth bounds how many pointers classify, identity and indirect follow, so a recursive
+// pointer type cannot loop forever. Real values never come close.
+const maxPointerDepth = 32
 
 // scalarKind returns the kind of a scalar reflect.Kind, or kindUnknown for any other.
 func scalarKind(kind reflect.Kind) valueKind {
@@ -570,7 +587,7 @@ func sortedByName(properties []Property) []Property {
 // empty slices, and scalars.
 func identity(value interface{}) nodeIdentity {
 	rv := reflect.ValueOf(value)
-	for rv.Kind() == reflect.Ptr {
+	for depth := 0; rv.Kind() == reflect.Ptr && depth < maxPointerDepth; depth++ {
 		if rv.Elem().Kind() == reflect.Array {
 			return nodeIdentity{pointer: rv.Pointer(), typ: rv.Type()}
 		}
@@ -705,9 +722,10 @@ func firstElement(value interface{}) (interface{}, bool) {
 	return rv.Index(0).Interface(), true
 }
 
-// indirect follows pointers to the value they point at. classify has already ruled out nil ones.
+// indirect follows pointers to the value they point at. classify has already ruled out nil ones
+// and chains longer than maxPointerDepth.
 func indirect(rv reflect.Value) reflect.Value {
-	for rv.Kind() == reflect.Ptr {
+	for depth := 0; rv.Kind() == reflect.Ptr && depth < maxPointerDepth; depth++ {
 		rv = rv.Elem()
 	}
 	return rv

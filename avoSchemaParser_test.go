@@ -91,6 +91,32 @@ func TestExtractSchema_JSONNumber(t *testing.T) {
 		`[{"propertyName":"i","propertyType":"int"},{"propertyName":"f","propertyType":"float"},{"propertyName":"e","propertyType":"float"}]`)
 }
 
+// A *json.Number (a pointer field decoded with UseNumber) is typed by its text, like a bare one.
+func TestExtractSchema_JSONNumberPointer(t *testing.T) {
+	f := json.Number("3.0")
+	i := json.Number("3")
+	pf := &f
+	assertSchemaJSON(t, extractSchema(om{{"f", &f}, {"i", &i}, {"pp", &pf}, {"list", []*json.Number{&f}}}),
+		`[{"propertyName":"f","propertyType":"float"},{"propertyName":"i","propertyType":"int"},{"propertyName":"pp","propertyType":"float"},{"propertyName":"list","propertyType":"list(float)","children":["float"]}]`)
+}
+
+// A recursive pointer type (type P *P; p = &p) dereferences to itself forever, so extraction
+// must stop following it instead of hanging.
+func TestExtractSchema_RecursivePointerTypeDoesNotHang(t *testing.T) {
+	type P *P
+	var p P
+	p = &p
+	done := make(chan []Property, 1)
+	go func() { done <- extractSchema(om{{"p", p}, {"list", []interface{}{p}}}) }()
+	select {
+	case schema := <-done:
+		assertSchemaJSON(t, schema,
+			`[{"propertyName":"p","propertyType":"unknown"},{"propertyName":"list","propertyType":"list(object)","children":["unknown"]}]`)
+	case <-time.After(5 * time.Second):
+		t.Fatal("extractSchema hung on a recursive pointer type")
+	}
+}
+
 // A plain Go map has no order, so its properties are listed sorted by key, at every level.
 func TestExtractSchema_PlainMapIsSortedByKey(t *testing.T) {
 	input := map[string]interface{}{
