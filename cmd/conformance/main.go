@@ -8,7 +8,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -55,12 +54,14 @@ func main() {
 }
 
 func run(stdin io.Reader, stdout io.Writer) int {
-	line, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	// Read all of stdin, like the reference harness: the runner pipes one line, and a
+	// pretty-printed envelope is read the same way.
+	raw, err := io.ReadAll(stdin)
+	if err != nil {
 		writeEnvelope(stdout, nil, false, nil, "resolve", "stdin read failed: "+err.Error())
 		return 2
 	}
-	decoded, err := decodeJSON(line)
+	decoded, err := decodeJSON(strings.TrimSpace(string(raw)))
 	if err != nil {
 		writeEnvelope(stdout, nil, false, nil, "resolve", "input JSON parse failed: "+err.Error())
 		return 2
@@ -129,10 +130,7 @@ type step struct {
 	timeout  time.Duration               // flush
 }
 
-var (
-	suites       = []string{"schema-extraction", "wire-protocol", "error-handling", "batching"}
-	environments = []string{"dev", "staging", "prod"}
-)
+var suites = []string{"schema-extraction", "wire-protocol", "error-handling", "batching"}
 
 // parseRequest checks the envelope against the runner contract (input envelope). A required field
 // must be present with its type and an optional one has its type when present; null is accepted
@@ -203,7 +201,8 @@ func parseRequest(envelope avoinspector.OrderedMap) (request, error) {
 }
 
 // constructorOptions maps the constructor block to Options. apiKey, env and version are required
-// strings, and env is dev, staging or prod; a blank string is left to the SDK to reject. batchSize
+// strings, passed verbatim (runner contract): a blank string is left to the SDK to reject, and an
+// env other than dev, staging or prod to the SDK's fallback to dev (SPEC.md §4.1). batchSize
 // and maxQueueSize are integers, batchFlushSeconds a number and disableBatchTimer a boolean; their
 // range is the SDK's to check.
 func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Options, error) {
@@ -215,9 +214,6 @@ func constructorOptions(constructor avoinspector.OrderedMap) (avoinspector.Optio
 	env, err := requireString(constructor, "constructor.", "env")
 	if err != nil {
 		return options, err
-	}
-	if !contains(environments, env) {
-		return options, configError{"constructor.env must be dev, staging or prod"}
 	}
 	options.Env = avoinspector.AvoInspectorEnv(env)
 	if options.AppVersion, err = requireString(constructor, "constructor.", "version"); err != nil {
@@ -346,15 +342,15 @@ func parseSteps(envelope avoinspector.OrderedMap) ([]step, error) {
 	return steps, nil
 }
 
-// parseTrackN checks a trackN step: count is a required integer >= 1, eventNamePrefix a required
-// string and streamId an optional string.
+// parseTrackN checks a trackN step: count is a required integer >= 1, and eventNamePrefix and
+// streamId are optional strings, "" when absent (as in the reference harness).
 func parseTrackN(object avoinspector.OrderedMap, where string, s step) (step, error) {
 	count, present, err := optionalInt(object, where, "count")
 	if err != nil || !present || count < 1 {
 		return s, configError{where + "count must be an integer >= 1"}
 	}
 	s.count = count
-	if s.prefix, err = requireString(object, where, "eventNamePrefix"); err != nil {
+	if s.prefix, _, err = optionalString(object, where, "eventNamePrefix"); err != nil {
 		return s, err
 	}
 	s.streamID, _, err = optionalString(object, where, "streamId")
