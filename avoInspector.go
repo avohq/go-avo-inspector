@@ -1,8 +1,25 @@
 package avoinspector
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"math/rand"
+	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
 type AvoInspectorEnv string
@@ -13,68 +30,976 @@ const (
 	Staging AvoInspectorEnv = "staging"
 )
 
+const (
+	defaultBatchSize         = 30
+	defaultBatchFlushSeconds = 30.0
+	maxBatchFlushSeconds     = 24 * 60 * 60.0
+	defaultMaxQueueSize      = 1000
+
+	// maxConcurrentSends is the number of batch sends in progress at once per inspector. Batches
+	// swapped out beyond this wait for a free sender, so a fast producer or a slow endpoint cannot
+	// open an unbounded number of requests.
+	maxConcurrentSends = 4
+	// maxWaitingEvents bounds the events in batches waiting for a sender. It is separate from
+	// MaxQueueSize, which bounds only the unsent buffer; past it the oldest waiting events are
+	// dropped.
+	maxWaitingEvents = 10000
+	// backpressureEvents is the number of events waiting for a sender at which, with
+	// Options.BlockWhenBacklogged, a tracking call waits for room before returning, so a tight
+	// loop is paced by the endpoint, as in v1.
+	backpressureEvents = 1000
+
+	noApiKeyMessage      = "[Avo Inspector] No API key provided. Inspector can't operate without API key."
+	apiKeyControlMessage = "[Avo Inspector] API key contains a control character. The API key is sent as a request header and cannot contain CR, LF, or NUL."
+	// apiKeyOtherControlMessage is for control characters other than CR, LF and NUL, which keep
+	// the spec's apiKeyControlMessage, and for a key that is not valid UTF-8. It is the Node SDK's
+	// message.
+	apiKeyOtherControlMessage = "[Avo Inspector] apiKey must not contain control characters"
+	noVersionMessage          = "[Avo Inspector] No version provided. Many features of Inspector rely on versioning. Please provide comparable string version, i.e. integer or semantic."
+	internalErrorMessage      = "Avo Inspector: something went wrong. Please report to support@avo.app."
+	logPrefix                 = "[Avo Inspector] "
+)
+
+// MissingEventName is the name an event is sent with when it is tracked with an empty or
+// whitespace-only name.
+const MissingEventName = "Missing Event Name"
+
+// DefaultFlushTimeout is how long Flush waits for in-flight sends when its context has no deadline
+// (SPEC.md §4.6: Flush always completes).
+const DefaultFlushTimeout = 10 * time.Second
+
+// ErrFlushTimeout is returned by Flush when it did not drain the inspector: something was still
+// buffered, waiting or in flight as it returned, because its context was done first (its deadline
+// passed or it was cancelled, including before the call) or DefaultFlushTimeout passed. The pending events are still queued for sending and the instance stays
+// usable, but some may not have been sent yet: before the process exits, flush again or accept that
+// they may be lost. Otherwise callers may ignore it.
+var ErrFlushTimeout = errors.New("Avo Inspector: flush returned before all events were sent")
+
+// shouldLog is the process-wide logging flag (SPEC.md §4.4).
+var shouldLog atomic.Bool
+
+// Options configures an AvoInspector (SPEC.md §4.1, §5).
+//
+// A zero BatchSize, BatchFlushSeconds or MaxQueueSize means "use the default", silently. A
+// negative value is invalid: it logs a warning and the default is used.
+type Options struct {
+	// ApiKey is the Inspector API key. Required.
+	ApiKey string
+	// Env is Dev, Staging or Prod. An empty or unknown value falls back to Dev with a warning.
+	Env AvoInspectorEnv
+	// AppVersion is the application version sent as appVersion. Required.
+	AppVersion string
+	// AppName is the application name sent as appName.
+	AppName string
+	// BatchSize flushes the pending batch when it holds this many events. Default 30; always 1 in
+	// Dev. With a batch size of 1, in any env, each event is sent during the tracking call, which
+	// waits for the response (SPEC.md §7.5). When earlier batches are still being sent, that wait
+	// can be longer than the request timeout.
+	BatchSize int
+	// BatchFlushSeconds is the longest an event waits in the pending batch before the scheduled
+	// flush sends it. Default 30; values above 86400 (24 hours) are capped with a warning.
+	BatchFlushSeconds float64
+	// MaxQueueSize caps the pending batch; on overflow the oldest events are dropped. Default 1000.
+	// A BatchSize above it is kept but logs a warning, since such a batch never fills.
+	MaxQueueSize int
+	// DisableBatchTimer turns off the scheduled flush, leaving the size trigger and Flush. Set it
+	// in serverless deployments.
+	DisableBatchTimer bool
+	// BlockWhenBacklogged makes a tracking call wait for room, for at most about 10 seconds, while
+	// 1,000 or more events wait for a sender, so a backfill loop is paced by the endpoint instead
+	// of overflowing the 10,000-event send backlog. Default false: tracking never waits for the
+	// backlog (SPEC.md §4.2), and past the backlog the oldest waiting events are dropped and the
+	// drop is logged. Do not set it for request handlers in a server: they would then wait
+	// whenever the Inspector API is slow.
+	BlockWhenBacklogged bool
+	// HTTPClient, when set, sends the requests, for a proxy, tracing or a test double. The SDK
+	// uses a copy of it and keeps its own limits on the copy: a request timeout of at most 10
+	// seconds, and no redirects (a redirect would carry the api-key header to another host). A
+	// nil Transport means the SDK's shared transport. Default nil: the shared transport, built
+	// from http.DefaultTransport when the first inspector is constructed.
+	HTTPClient *http.Client
+}
+
+// InspectorEvent is one tracked event, the single argument of TrackSchemaFromEvent. Every field
+// is optional. The gateway fields (OutputReference, OriginHint, OriginAppVersion) are trimmed and
+// left out of the wire body when blank.
+type InspectorEvent struct {
+	// EventName is the event's name. An empty or whitespace name is sent as MissingEventName.
+	EventName string
+	// EventProperties are the event's properties. Their schema lists them sorted by key; nil means
+	// no properties.
+	EventProperties map[string]interface{}
+	// OrderedEventProperties are the event's properties in the order the schema keeps. When it is
+	// non-nil it is used instead of EventProperties, and setting both logs a warning.
+	OrderedEventProperties OrderedMap
+	// StreamId is sent verbatim as the event's streamId; empty means none.
+	StreamId string
+	// OutputReference is the gateway output this observation was bound for (e.g. "meta-x7k2q").
+	// Empty means the observation was taken at the gateway checkpoint.
+	OutputReference string
+	// OriginHint is a low-cardinality label of the source the event came from (e.g. "web",
+	// "ios"). It MUST NOT be a user identifier or any other high-cardinality value.
+	OriginHint string
+	// OriginAppVersion is the app version of the source that produced this event. It overrides
+	// the instance's AppVersion for this event; when OriginHint is set and this is empty, the
+	// event is sent with a null appVersion.
+	OriginAppVersion string
+}
+
+// AvoInspector extracts event schemas and reports them to the Avo Inspector API. It is safe for
+// concurrent use. Callers must call Flush before the process (or serverless handler) exits.
 type AvoInspector struct {
 	apiKey                 string
 	environment            AvoInspectorEnv
 	version                string
-	avoNetworkCallsHandler *AvoNetworkCallsHandler
-	shouldLog              bool
+	appName                string
+	avoNetworkCallsHandler *networkCallsHandler
+
+	batchSize           int
+	batchFlushSeconds   float64
+	maxQueueSize        int
+	disableBatchTimer   bool
+	blockWhenBacklogged bool
+
+	// mu guards every field below.
+	mu           sync.Mutex
+	samplingRate float64
+	pending      []wireEvent
+	// inFlight holds a done channel for every batch that has left the buffer and is not finished:
+	// being sent, or waiting in waiting for a sender. Flush waits on these.
+	inFlight      map[uint64]chan struct{}
+	nextSendID    uint64
+	waiting       []*queuedBatch
+	waitingEvents int
+	// room is closed and replaced whenever waitingEvents falls or the inspector is destroyed, to
+	// wake tracking calls waiting for room (awaitRoom).
+	room          chan struct{}
+	activeSenders int
+	destroyed     bool
+	// flushTimer is armed while the pending batch holds events and the batch timer is enabled.
+	// timerGeneration changes whenever the batch is swapped out, so a timer that fires after its
+	// batch was already taken does nothing.
+	flushTimer      *time.Timer
+	timerGeneration uint64
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
+func init() {
+	testhooks.SetSamplingRate = func(inspector interface{}, rate float64) {
+		inspector.(*AvoInspector).setSamplingRate(rate)
+	}
+	testhooks.SetProductionEndpoint = func(url string) {
+		trackingEndpoint = url
+	}
+}
+
+// NewAvoInspector creates an inspector with the default batch configuration.
 func NewAvoInspector(apiKey string, env AvoInspectorEnv, appVersion string, appName string) (*AvoInspector, error) {
-	if env == "" {
+	return NewAvoInspectorWithOptions(Options{ApiKey: apiKey, Env: env, AppVersion: appVersion, AppName: appName})
+}
+
+// NewAvoInspectorWithOptions creates an inspector. It returns an error if ApiKey or AppVersion is
+// empty or whitespace, or if ApiKey is not valid UTF-8 or contains a control character other
+// than tab.
+func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
+	if trimSpace(options.ApiKey) == "" {
+		return nil, errors.New(noApiKeyMessage)
+	}
+	if !utf8.ValidString(options.ApiKey) {
+		return nil, errors.New(apiKeyOtherControlMessage)
+	}
+	if strings.ContainsAny(options.ApiKey, "\r\n\x00") {
+		return nil, errors.New(apiKeyControlMessage)
+	}
+	if !isSafeHeaderValue(options.ApiKey) {
+		return nil, errors.New(apiKeyOtherControlMessage)
+	}
+	if trimSpace(options.AppVersion) == "" {
+		return nil, errors.New(noVersionMessage)
+	}
+
+	env := options.Env
+	if env != Dev && env != Staging && env != Prod {
+		logAlways("Invalid env %q, falling back to \"dev\".", string(env))
 		env = Dev
-		fmt.Println("[Avo Inspector] No environment provided. Defaulting to dev.")
+	}
+	shouldLog.Store(env == Dev)
+
+	batchSize := defaultBatchSize
+	if options.BatchSize < 0 {
+		logAlways("Invalid batchSize %d; using default %d.", options.BatchSize, defaultBatchSize)
+	} else if options.BatchSize > 0 {
+		batchSize = options.BatchSize
+	}
+	if env == Dev {
+		batchSize = 1
+	}
+	batchFlushSeconds := defaultBatchFlushSeconds
+	switch {
+	case options.BatchFlushSeconds < 0 || math.IsNaN(options.BatchFlushSeconds):
+		logAlways("Invalid batchFlushSeconds %v; using default %v.", options.BatchFlushSeconds, defaultBatchFlushSeconds)
+	case options.BatchFlushSeconds > maxBatchFlushSeconds:
+		// Larger values overflow the timer's time.Duration.
+		logAlways("batchFlushSeconds %v is above the maximum; using %v (24 hours).", options.BatchFlushSeconds, maxBatchFlushSeconds)
+		batchFlushSeconds = maxBatchFlushSeconds
+	case options.BatchFlushSeconds > 0:
+		batchFlushSeconds = options.BatchFlushSeconds
+	}
+	maxQueueSize := defaultMaxQueueSize
+	if options.MaxQueueSize < 0 {
+		logAlways("Invalid maxQueueSize %d; using default %d.", options.MaxQueueSize, defaultMaxQueueSize)
+	} else if options.MaxQueueSize > 0 {
+		maxQueueSize = options.MaxQueueSize
+	}
+	// Not clamped: conformance fixture batch-4 requires FIFO overflow in this case.
+	if batchSize > maxQueueSize {
+		logAlways("batchSize %d is larger than maxQueueSize %d, so a batch never fills: events are sent "+
+			"only by the scheduled flush or Flush, and the oldest are dropped once %d are buffered. "+
+			"Set BatchSize to at most MaxQueueSize.", batchSize, maxQueueSize, maxQueueSize)
 	}
 
-	if apiKey == "" {
-		return nil, errors.New("[Avo Inspector] No API key provided. Inspector can't operate without API key.")
-	}
-
-	if appVersion == "" {
-		return nil, errors.New("[Avo Inspector] No version provided. Some features of Inspector rely on versioning. Please provide comparable string version, i.e. integer or semantic.")
-	}
-
-	shouldLog := env == Dev
-	libVersion := "1.0.0"
-	avoNetworkCallsHandler := newAvoNetworkCallsHandler(apiKey, string(env), appName, appVersion, libVersion, shouldLog)
-
-	return &AvoInspector{
-		apiKey:                 apiKey,
+	ctx, cancel := context.WithCancel(context.Background())
+	inspector := &AvoInspector{
+		apiKey:                 options.ApiKey,
 		environment:            env,
-		version:                appVersion,
-		avoNetworkCallsHandler: avoNetworkCallsHandler,
-		shouldLog:              shouldLog,
-	}, nil
+		version:                options.AppVersion,
+		appName:                options.AppName,
+		avoNetworkCallsHandler: newNetworkCallsHandler(options.ApiKey, env, options.HTTPClient),
+		batchSize:              batchSize,
+		batchFlushSeconds:      batchFlushSeconds,
+		maxQueueSize:           maxQueueSize,
+		disableBatchTimer:      options.DisableBatchTimer,
+		blockWhenBacklogged:    options.BlockWhenBacklogged,
+		samplingRate:           1.0,
+		inFlight:               map[uint64]chan struct{}{},
+		room:                   make(chan struct{}),
+		ctx:                    ctx,
+		cancel:                 cancel,
+	}
+	return inspector, nil
 }
 
-func (c *AvoInspector) ShouldLog(shouldLog bool) {
-	c.shouldLog = shouldLog
+// EnableLogging turns diagnostic logging on or off for every inspector in the process. It is on
+// by default in Dev and off otherwise. Do not enable it in production.
+func (inspector *AvoInspector) EnableLogging(enable bool) {
+	shouldLog.Store(enable)
 }
 
-func (inspector *AvoInspector) TrackSchemaFromEvent(eventName string, eventProperties map[string]interface{}) ([]Property, error) {
-	if inspector.shouldLog {
-		fmt.Printf("Avo Inspector: supplied event %s with params %v\n", eventName, eventProperties)
-	}
+// ExtractSchema returns the schema of eventProperties without sending anything. Properties are
+// listed sorted by key; use ExtractOrderedSchema to keep a specific order. It never panics and
+// returns an empty schema for nil input.
+func (inspector *AvoInspector) ExtractSchema(eventProperties map[string]interface{}) []Property {
+	return safeExtractSchema(eventProperties)
+}
 
-	eventSchema := extractSchema(eventProperties)
-	sessionID := newGuid()
-	inspectorBatchBody := []any{
-		inspector.avoNetworkCallsHandler.bodyForSessionStartedCall(sessionID),
-		inspector.avoNetworkCallsHandler.bodyForEventSchemaCall(sessionID, eventName, eventSchema),
-	}
+// ExtractOrderedSchema is ExtractSchema for properties given as an OrderedMap, whose order the
+// schema keeps.
+func (inspector *AvoInspector) ExtractOrderedSchema(eventProperties OrderedMap) []Property {
+	return safeExtractSchema(eventProperties)
+}
 
-	err := inspector.avoNetworkCallsHandler.callInspectorWithBatchBody(inspectorBatchBody)
-	if err != nil {
-		if inspector.shouldLog {
-			fmt.Printf("Avo Inspector: schema sending failed: %s\n", err)
+func safeExtractSchema(eventProperties interface{}) (schema []Property) {
+	defer func() {
+		if r := recover(); r != nil {
+			logInternalError("extractSchema error", r)
+			schema = []Property{}
 		}
-		return nil, fmt.Errorf("Avo Inspector: schema sending failed: %w", err)
+	}()
+	return extractSchema(eventProperties)
+}
+
+// TrackSchemaFromEvent extracts the schema of the event's properties, samples the event, and adds
+// it to the pending batch, which is sent when it reaches the batch size, when the scheduled flush
+// runs, or on Flush.
+//
+// It returns the extracted schema. The returned error is non-nil only for an internal failure
+// before the event was queued; delivery failures are never returned. With a batch size of 1
+// (always in Dev) the event is sent before returning; a non-200 response returns an empty schema,
+// while a network failure or timeout still returns the schema. After Destroy it returns an empty
+// schema and sends nothing. An event whose name is empty or whitespace is sent as
+// MissingEventName, and a rate-limited line reports it. It never waits for the send backlog unless
+// Options.BlockWhenBacklogged is set: then, while 1,000 or more events wait to be sent, it waits
+// for room before returning, for at most about the 10-second request timeout; Destroy releases it.
+func (inspector *AvoInspector) TrackSchemaFromEvent(event InspectorEvent) ([]Property, error) {
+	var properties interface{} = event.EventProperties
+	if event.OrderedEventProperties != nil {
+		if event.EventProperties != nil {
+			logLimited("both-event-properties", 1, func(_, suppressed int, seconds int64) string {
+				return "InspectorEvent has both EventProperties and OrderedEventProperties; using OrderedEventProperties." + suppressedSuffix(suppressed, seconds)
+			})
+		}
+		properties = event.OrderedEventProperties
+	}
+	return inspector.track(event, properties)
+}
+
+// track tracks event with the properties TrackSchemaFromEvent resolved from it.
+func (inspector *AvoInspector) track(event InspectorEvent, eventProperties interface{}) (schema []Property, err error) {
+	inspector.mu.Lock()
+	destroyed := inspector.destroyed
+	inspector.mu.Unlock()
+	if destroyed {
+		return []Property{}, nil
 	}
 
-	if inspector.shouldLog {
-		fmt.Println("Avo Inspector: schema sent successfully.")
+	defer func() {
+		if r := recover(); r != nil {
+			logInternalError("internal error", r)
+			schema, err = nil, errors.New(internalErrorMessage)
+		}
+	}()
+
+	if trimSpace(event.EventName) == "" {
+		event.EventName = MissingEventName
+		logLimited("missing-event-name", 1, func(total, _ int, seconds int64) string {
+			return fmt.Sprintf("%d event(s) tracked without an event name in the last %ds, sent as %q.", total, seconds, MissingEventName)
+		})
+	}
+	schema = safeExtractSchema(eventProperties)
+	if strings.Contains(event.StreamId, ":") {
+		logLimited("streamid-colon", 1, func(_, suppressed int, seconds int64) string {
+			return "streamId contains ':'; using the value verbatim." + suppressedSuffix(suppressed, seconds)
+		})
+	}
+	if shouldLog.Load() {
+		logf("supplied event %q with schema %s", event.EventName, schemaForLog(schema))
 	}
 
-	return eventSchema, nil
+	batch, startSender, dropped, backlogDropped, outcome := inspector.enqueue(inspector.newWireEvent(event, schema))
+	switch outcome {
+	case destroyedBeforeEnqueue:
+		return []Property{}, nil
+	case sampledOut:
+		logIfEnabled("event %q dropped due to sampling rate.", event.EventName)
+		return schema, nil
+	}
+	if dropped > 0 {
+		logDropped(dropped, "queue full")
+	}
+	if batch == nil {
+		inspector.awaitRoom()
+		return schema, nil
+	}
+	// Start the sender at once: takeBatch has registered the batch in flight and reserved its
+	// slot, and nothing between here and the goroutine can fail.
+	inspector.launch(batch, startSender, backlogDropped)
+	if inspector.batchSize == 1 {
+		// Immediate-send mode: the outcome of this call's own send is observable (SPEC.md §7.5).
+		if res, ok := <-batch.result; ok && res.status == sendNon200 {
+			return []Property{}, nil
+		}
+	}
+	inspector.awaitRoom()
+	return schema, nil
+}
+
+// enqueueOutcome is what enqueue did with an event.
+type enqueueOutcome int
+
+const (
+	enqueued enqueueOutcome = iota
+	sampledOut
+	destroyedBeforeEnqueue
+)
+
+// enqueue samples event and appends it to the pending batch in one critical section: it drops the
+// oldest pending events past MaxQueueSize, and takes the batch when it is full, otherwise arms the
+// flush timer. It returns what takeBatch returned, how many pending events were dropped, and what
+// it did with the event; only an enqueued event is queued. The caller logs and launches outside
+// the lock.
+func (inspector *AvoInspector) enqueue(event wireEvent) (batch *queuedBatch, startSender bool, dropped, backlogDropped int, outcome enqueueOutcome) {
+	inspector.mu.Lock()
+	defer inspector.mu.Unlock()
+	if inspector.destroyed {
+		return nil, false, 0, 0, destroyedBeforeEnqueue
+	}
+	// SPEC.md §7.7: per-event sampling at enqueue. The decision and the samplingRate on the wire use
+	// the rate in effect now, which a 200 may have changed since the call started.
+	if rand.Float64() > inspector.samplingRate {
+		return nil, false, 0, 0, sampledOut
+	}
+	event.SamplingRate = inspector.samplingRate
+	inspector.pending = append(inspector.pending, event)
+	for len(inspector.pending) > inspector.maxQueueSize {
+		inspector.pending = inspector.pending[1:]
+		dropped++
+	}
+	if len(inspector.pending) >= inspector.batchSize {
+		batch, startSender, backlogDropped = inspector.takeBatch()
+	} else {
+		inspector.armFlushTimer()
+	}
+	return batch, startSender, dropped, backlogDropped, enqueued
+}
+
+// newWireEvent builds the wire body of one event, resolving the gateway options (SPEC.md §7.3.6).
+// The event name has already been replaced by MissingEventName when blank, and enqueue sets the
+// samplingRate.
+func (inspector *AvoInspector) newWireEvent(event InspectorEvent, schema []Property) wireEvent {
+	outputReference := trimSpace(event.OutputReference)
+	originHint := trimSpace(event.OriginHint)
+	var appVersion *string
+	if originAppVersion := trimSpace(event.OriginAppVersion); originAppVersion != "" {
+		appVersion = &originAppVersion
+	} else if originHint == "" {
+		version := inspector.version
+		appVersion = &version
+	}
+	return wireEvent{
+		ApiKey:          inspector.apiKey,
+		AppName:         inspector.appName,
+		AppVersion:      appVersion,
+		LibVersion:      Version,
+		Env:             string(inspector.environment),
+		LibPlatform:     LibPlatform,
+		MessageId:       newGuid(),
+		StreamId:        event.StreamId,
+		CreatedAt:       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Type:            "event",
+		EventName:       event.EventName,
+		OutputReference: outputReference,
+		OriginHint:      originHint,
+		// A copy in wire shape: the caller gets schema back and may change it before the event
+		// is sent.
+		EventProperties: toWireProperties(schema),
+	}
+}
+
+// queuedBatch is a batch that has left the buffer. It is registered in inFlight from that moment,
+// so Flush waits for it whether it is being sent or still waiting for a sender.
+type queuedBatch struct {
+	id     uint64
+	events []wireEvent
+	// done is closed once the batch is sent or discarded.
+	done chan struct{}
+	// result yields the send result once, or is closed without a value if the batch is discarded.
+	result chan sendResult
+}
+
+// takeBatch swaps out the pending batch and registers it as in flight, then hands it to a new
+// sender if fewer than maxConcurrentSends are running, or queues it to wait for one. It does all of
+// this in one critical section, so a concurrent Flush can never miss a batch. It returns the batch
+// (nil when the buffer was empty), whether the caller must start a sender for it, and how many
+// waiting events were dropped because the backlog passed maxWaitingEvents. Call it with mu held,
+// then pass the results to launch after releasing it.
+func (inspector *AvoInspector) takeBatch() (batch *queuedBatch, startSender bool, dropped int) {
+	events := inspector.takePending()
+	if len(events) == 0 {
+		return nil, false, 0
+	}
+	batch = &queuedBatch{
+		id:     inspector.nextSendID,
+		events: events,
+		done:   make(chan struct{}),
+		result: make(chan sendResult, 1),
+	}
+	inspector.nextSendID++
+	inspector.inFlight[batch.id] = batch.done
+	if inspector.activeSenders < maxConcurrentSends {
+		inspector.activeSenders++
+		return batch, true, 0
+	}
+	inspector.waiting = append(inspector.waiting, batch)
+	inspector.waitingEvents += len(events)
+	return batch, false, inspector.dropOldestWaiting()
+}
+
+// dropOldestWaiting drops the oldest waiting events (FIFO) until at most maxWaitingEvents wait, and
+// returns how many it dropped. A batch left empty is discarded. Call it with mu held.
+func (inspector *AvoInspector) dropOldestWaiting() int {
+	dropped := 0
+	for inspector.waitingEvents > maxWaitingEvents && len(inspector.waiting) > 0 {
+		oldest := inspector.waiting[0]
+		n := inspector.waitingEvents - maxWaitingEvents
+		if n > len(oldest.events) {
+			n = len(oldest.events)
+		}
+		oldest.events = oldest.events[n:]
+		inspector.waitingEvents -= n
+		inspector.signalRoom()
+		dropped += n
+		if len(oldest.events) == 0 {
+			inspector.waiting[0] = nil
+			inspector.waiting = inspector.waiting[1:]
+			inspector.discard(oldest)
+		}
+	}
+	return dropped
+}
+
+// discard finishes a batch without sending it. Call it with mu held.
+func (inspector *AvoInspector) discard(batch *queuedBatch) {
+	delete(inspector.inFlight, batch.id)
+	finishUnsent(batch)
+}
+
+// finishUnsent finishes a batch that yields no send result: result is closed without a value and
+// done is closed. The caller removes it from inFlight.
+func finishUnsent(batch *queuedBatch) {
+	close(batch.result)
+	close(batch.done)
+}
+
+// launch acts on what takeBatch returned, outside the lock: it logs the backlog drop and starts a
+// sender for the batch when takeBatch reserved one.
+func (inspector *AvoInspector) launch(batch *queuedBatch, startSender bool, dropped int) {
+	if dropped > 0 {
+		logDropped(dropped, "send backlog full")
+	}
+	if startSender {
+		go inspector.runSender(batch)
+	}
+}
+
+// signalRoom wakes every tracking call waiting in awaitRoom. Call it with mu held whenever
+// waitingEvents falls or the inspector is destroyed.
+func (inspector *AvoInspector) signalRoom() {
+	close(inspector.room)
+	inspector.room = make(chan struct{})
+}
+
+// awaitRoom is the opt-in backpressure (Options.BlockWhenBacklogged): while backpressureThreshold
+// or more events wait for a sender, the tracking call waits for room, so a loop that tracks faster
+// than the endpoint accepts is paced by it instead of overflowing the backlog. The wait ends when
+// the backlog falls below the threshold, when the inspector is destroyed, or after
+// backpressureWait at most. Without the option it returns at once.
+func (inspector *AvoInspector) awaitRoom() {
+	if !inspector.blockWhenBacklogged {
+		return
+	}
+	deadline := time.Now().Add(backpressureWait)
+	for {
+		inspector.mu.Lock()
+		if inspector.destroyed || inspector.waitingEvents < backpressureThreshold {
+			inspector.mu.Unlock()
+			return
+		}
+		room := inspector.room
+		inspector.mu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-room:
+			timer.Stop()
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+// popWaiting removes the oldest waiting batch and wakes tracking calls waiting for room. Call it
+// with mu held and at least one batch waiting.
+func (inspector *AvoInspector) popWaiting() *queuedBatch {
+	batch := inspector.waiting[0]
+	inspector.waiting[0] = nil
+	inspector.waiting = inspector.waiting[1:]
+	inspector.waitingEvents -= len(batch.events)
+	inspector.signalRoom()
+	return batch
+}
+
+// runSender sends batch, then keeps sending waiting batches in order until none are left, and
+// exits. At most maxConcurrentSends run at once, and none runs while nothing is waiting.
+func (inspector *AvoInspector) runSender(batch *queuedBatch) {
+	for {
+		inspector.send(batch)
+		inspector.mu.Lock()
+		if inspector.destroyed || len(inspector.waiting) == 0 {
+			inspector.activeSenders--
+			inspector.mu.Unlock()
+			return
+		}
+		batch = inspector.popWaiting()
+		inspector.mu.Unlock()
+	}
+}
+
+// post sends one batch. A panic inside it is recovered and logged as an internal error by type,
+// and posted is false, so the sender goes on and its slot is freed.
+func (inspector *AvoInspector) post(batch *queuedBatch) (res sendResult, posted bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logInternalError("send error", recovered)
+			posted = false
+		}
+	}()
+	if testHookInSend != nil {
+		testHookInSend()
+	}
+	return inspector.avoNetworkCallsHandler.send(inspector.ctx, batch.events), true
+}
+
+// send posts one batch outside the lock and finishes it. A batch whose post panicked counts as
+// dropped.
+func (inspector *AvoInspector) send(batch *queuedBatch) {
+	res, posted := inspector.post(batch)
+	inspector.mu.Lock()
+	if posted && res.status == sendOk && res.samplingRate != nil {
+		inspector.samplingRate = *res.samplingRate
+	}
+	delete(inspector.inFlight, batch.id)
+	inspector.mu.Unlock()
+	if !posted {
+		logDropped(len(batch.events), "internal error")
+		finishUnsent(batch)
+		return
+	}
+	// SPEC.md §7.5, §12.5: a failed batch is logged and dropped, never re-queued or retried.
+	switch res.status {
+	case sendOk:
+		logIfEnabled("sent %d event(s).", len(batch.events))
+	case sendNon200:
+		logRejected(res.statusCode)
+	case sendFailed:
+		// A send abandoned by Destroy is not a failure.
+		failure, ok := res.err.(*sendFailure)
+		if !ok {
+			failure = errRequestFailed
+		}
+		if failure != errRequestAborted {
+			logFailedSend(failure)
+		}
+	}
+	batch.result <- res
+	close(batch.done)
+}
+
+// Flush sends every pending event and waits until all in-flight sends have completed, or until ctx
+// is done. A ctx without a deadline waits at most DefaultFlushTimeout (10 seconds), so Flush always
+// completes (SPEC.md §4.6); a nil ctx is treated as context.Background(). An already-cancelled ctx
+// starts the sends without waiting for them. The error reports whether Flush drained the
+// inspector: nil when, as Flush returns, nothing is buffered, waiting or in flight, and
+// ErrFlushTimeout otherwise, such as when ctx is done first. Either way the pending events are
+// queued for sending and the inspector stays usable; ErrFlushTimeout means some may not have been
+// sent yet, and callers may otherwise ignore it. Delivery failures are not reported. On a destroyed
+// inspector Flush returns nil. Call Flush before the process or serverless handler exits, with a
+// context that still has time for the sends (after http.Server.Shutdown, not the context it may
+// have used up): pending events are otherwise lost.
+func (inspector *AvoInspector) Flush(ctx context.Context) error {
+	// Report held log counts whose window has expired, after the sends this call waited for.
+	defer flushLogCounts(true)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultFlushTimeout)
+		defer cancel()
+	}
+	inspector.mu.Lock()
+	if inspector.destroyed {
+		inspector.mu.Unlock()
+		return nil
+	}
+	batch, startSender, dropped := inspector.takeBatch()
+	waiting := make([]chan struct{}, 0, len(inspector.inFlight))
+	for _, done := range inspector.inFlight {
+		waiting = append(waiting, done)
+	}
+	inspector.mu.Unlock()
+
+	if batch != nil {
+		inspector.launch(batch, startSender, dropped)
+	}
+
+	for _, done := range waiting {
+		// A send that already completed counts even when ctx is done too.
+		select {
+		case <-done:
+			continue
+		default:
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ErrFlushTimeout
+		}
+	}
+	// Drained only if nothing is left now, including events queued while Flush waited.
+	inspector.mu.Lock()
+	drained := len(inspector.pending) == 0 && len(inspector.inFlight) == 0
+	inspector.mu.Unlock()
+	if !drained {
+		return ErrFlushTimeout
+	}
+	return nil
+}
+
+// Destroy discards pending events and batches waiting to be sent, abandons in-flight sends and
+// stops the scheduled flush. Afterwards TrackSchemaFromEvent sends nothing. It does not flush.
+func (inspector *AvoInspector) Destroy() {
+	inspector.mu.Lock()
+	if inspector.destroyed {
+		inspector.mu.Unlock()
+		return
+	}
+	inspector.destroyed = true
+	inspector.takePending()
+	for _, batch := range inspector.waiting {
+		inspector.discard(batch)
+	}
+	inspector.waiting = nil
+	inspector.waitingEvents = 0
+	inspector.signalRoom()
+	inspector.inFlight = map[uint64]chan struct{}{}
+	inspector.mu.Unlock()
+
+	inspector.cancel()
+	flushLogCounts(false)
+}
+
+// takePending swaps out the pending batch and disarms the flush timer. Call it with mu held.
+func (inspector *AvoInspector) takePending() []wireEvent {
+	batch := inspector.pending
+	inspector.pending = nil
+	if inspector.flushTimer != nil {
+		inspector.flushTimer.Stop()
+		inspector.flushTimer = nil
+	}
+	inspector.timerGeneration++
+	return batch
+}
+
+// armFlushTimer starts the one-shot flush timer when the first event enters an empty batch, so no
+// event waits longer than batchFlushSeconds (SPEC.md §12.3). Nothing runs while the batch is
+// empty, so an idle inspector holds no goroutine or timer. Call it with mu held.
+func (inspector *AvoInspector) armFlushTimer() {
+	if inspector.disableBatchTimer || inspector.batchSize <= 1 || inspector.flushTimer != nil || len(inspector.pending) == 0 {
+		return
+	}
+	delay := time.Duration(inspector.batchFlushSeconds * float64(time.Second))
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	generation := inspector.timerGeneration
+	inspector.flushTimer = time.AfterFunc(delay, func() { inspector.onFlushTimer(generation) })
+}
+
+func (inspector *AvoInspector) onFlushTimer(generation uint64) {
+	inspector.mu.Lock()
+	if inspector.destroyed || generation != inspector.timerGeneration {
+		inspector.mu.Unlock()
+		return
+	}
+	batch, startSender, dropped := inspector.takeBatch()
+	inspector.mu.Unlock()
+	if batch != nil {
+		inspector.launch(batch, startSender, dropped)
+	}
+}
+
+// setSamplingRate is a test-only hook reached through internal/testhooks; it is deliberately not
+// exported, since a public setter would let callers silently disable reporting.
+func (inspector *AvoInspector) setSamplingRate(rate float64) {
+	inspector.mu.Lock()
+	inspector.samplingRate = rate
+	inspector.mu.Unlock()
+}
+
+// backpressureThreshold and backpressureWait are backpressureEvents and the request timeout; they
+// are variables only so tests can change them.
+var (
+	backpressureThreshold = backpressureEvents
+	backpressureWait      = requestTimeout
+)
+
+// testHookInSend, when set by a test, runs inside a sender just before a batch is posted. It is
+// always nil outside tests.
+var testHookInSend func()
+
+// logRateWindow is how long an always-on log line of one kind stays quiet after it is printed.
+const logRateWindow = 10 * time.Second
+
+// logLimiter rate-limits the always-on log lines. For each key (a kind, plus the reason or status
+// within it) it keeps when the current window began, how many occurrences were suppressed since,
+// and how to word that key's line. It has no timer: suppressed counts are reported on the next
+// occurrence after the window, by Flush once the window has expired, or by Destroy
+// (flushLogCounts).
+var logLimiter = struct {
+	sync.Mutex
+	entries map[string]*limitedLog
+	now     func() time.Time
+}{entries: map[string]*limitedLog{}, now: time.Now}
+
+type limitedLog struct {
+	windowStart time.Time
+	suppressed  int
+	line        logLine
+}
+
+// logLine words a limited line: total occurrences to report, how many of them were suppressed,
+// and the whole seconds they span.
+type logLine func(total, suppressed int, seconds int64) string
+
+// logLimited prints an always-on line for n occurrences under key, at most once per
+// logRateWindow. The line reports n plus the occurrences suppressed since the window began, over
+// the real time since then. time.Now carries a monotonic reading, so the span is monotonic.
+func logLimited(key string, n int, line logLine) {
+	logLimiter.Lock()
+	now := logLimiter.now()
+	entry, seen := logLimiter.entries[key]
+	if seen && now.Sub(entry.windowStart) < logRateWindow {
+		entry.suppressed += n
+		entry.line = line
+		logLimiter.Unlock()
+		return
+	}
+	suppressed, seconds := 0, int64(1)
+	if seen {
+		suppressed, seconds = entry.suppressed, wholeSeconds(now.Sub(entry.windowStart))
+	}
+	logLimiter.entries[key] = &limitedLog{windowStart: now, line: line}
+	logLimiter.Unlock()
+	logf("%s", line(n+suppressed, suppressed, seconds))
+}
+
+// flushLogCounts prints the line of every key holding suppressed occurrences and resets it, so a
+// burst followed by quiet is still reported. Flush passes expiredOnly, which skips keys whose window
+// is still open: an app that flushes after every event keeps the rate limit. Destroy reports
+// everything.
+func flushLogCounts(expiredOnly bool) {
+	logLimiter.Lock()
+	now := logLimiter.now()
+	keys := make([]string, 0, len(logLimiter.entries))
+	for key, entry := range logLimiter.entries {
+		if entry.suppressed > 0 && (!expiredOnly || now.Sub(entry.windowStart) >= logRateWindow) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		entry := logLimiter.entries[key]
+		lines = append(lines, entry.line(entry.suppressed, entry.suppressed, wholeSeconds(now.Sub(entry.windowStart))))
+		delete(logLimiter.entries, key)
+	}
+	logLimiter.Unlock()
+	for _, line := range lines {
+		logf("%s", line)
+	}
+}
+
+// wholeSeconds is the whole seconds in d, at least 1.
+func wholeSeconds(d time.Duration) int64 {
+	if seconds := int64(d / time.Second); seconds > 1 {
+		return seconds
+	}
+	return 1
+}
+
+// logDropped reports events lost before sending: reason is "queue full" (maxQueueSize),
+// "send backlog full" (maxWaitingEvents) or "internal error" (a send that panicked).
+func logDropped(n int, reason string) {
+	logLimited("dropped:"+reason, n, func(total, _ int, seconds int64) string {
+		return fmt.Sprintf("dropped %d event(s) (%s) in the last %ds.", total, reason, seconds)
+	})
+}
+
+// logRejected reports a batch answered with a non-200 status. Only the status is logged, never
+// the response body.
+func logRejected(status int) {
+	logLimited("non200:"+strconv.Itoa(status), 1, func(total, _ int, seconds int64) string {
+		return fmt.Sprintf("%d batch(es) rejected with HTTP %d in the last %ds.", total, status, seconds)
+	})
+}
+
+// logFailedSend reports a batch lost to a network error, a timeout or a refused send. Its text and
+// its limiter key come from the failure's fixed label, never from an error message.
+func logFailedSend(failure *sendFailure) {
+	logLimited("failed:"+failure.label, 1, func(_, suppressed int, seconds int64) string {
+		return "schema sending failed: " + failure.label + "." + suppressedSuffix(suppressed, seconds)
+	})
+}
+
+// logInternalError reports a recovered internal error by its type only (for example
+// "*errors.errorString"): a panic value or error message can carry user data.
+func logInternalError(context string, recovered interface{}) {
+	// The type is part of the key, so a held count is always reported under its own type.
+	logLimited(fmt.Sprintf("internal:%s:%T", context, recovered), 1, func(_, suppressed int, seconds int64) string {
+		return fmt.Sprintf("%s: %T%s", context, recovered, suppressedSuffix(suppressed, seconds))
+	})
+}
+
+func suppressedSuffix(suppressed int, seconds int64) string {
+	if suppressed == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d more in the last %ds)", suppressed, seconds)
+}
+
+// logOutput receives every log line; SetLogOutput and tests swap it under logMu.
+var (
+	logMu     sync.Mutex
+	logOutput io.Writer = os.Stderr
+)
+
+// SetLogOutput sets where every inspector in the process writes its log lines; like the logging
+// flag (EnableLogging, SPEC.md §4.4) it is process-wide. The default is os.Stderr, and a nil w
+// restores it. Use it to route the lines into the host's logger, or io.Discard to silence them,
+// including the always-on reports of dropped events, refused batches, failed sends and internal
+// errors. Writes are serialized, so w need not be safe for concurrent use; write errors are
+// ignored, and a write that panics loses its line.
+//
+// w is called with a process-wide lock held, from the caller's goroutines and the SDK's own:
+// while a write blocks, every SDK call that logs waits too, senders included. w must not call into
+// the SDK.
+func SetLogOutput(w io.Writer) {
+	if w == nil {
+		w = os.Stderr
+	}
+	logMu.Lock()
+	logOutput = w
+	logMu.Unlock()
+}
+
+// Log helpers. None of them may be passed the apiKey (SPEC.md §7.5.1) or raw event property
+// values; log a schema with schemaForLog instead.
+
+func logf(format string, args ...interface{}) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	// The writer can be the caller's (SetLogOutput), called from the SDK's own goroutines: a panic
+	// in it loses the line, never the host process.
+	defer func() { _ = recover() }()
+	fmt.Fprintf(logOutput, logPrefix+format+"\n", args...)
+}
+
+// schemaForLog renders a schema in its wire shape (property names, types and children) for a log
+// line. It is the only form of event properties that may be logged: logging is process-wide, so a
+// dev instance can turn it on for a prod one, and raw values can hold personal data.
+func schemaForLog(schema []Property) string {
+	encoded, err := json.Marshal(toWireProperties(schema))
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+// logAlways writes whatever the logging flag: warnings about caller mistakes (SPEC.md §4.2,
+// §6.3) and reports of network errors, timeouts, refused sends and internal errors (§4.2, §7.5).
+func logAlways(format string, args ...interface{}) {
+	logf(format, args...)
+}
+
+// logIfEnabled writes only when logging is enabled: diagnostics such as per-event lines,
+// successful sends and sampling drops. Data loss and internal errors are always logged, through
+// logLimited.
+func logIfEnabled(format string, args ...interface{}) {
+	if shouldLog.Load() {
+		logf(format, args...)
+	}
+}
+
+// trimSpace trims the whitespace JavaScript's String.prototype.trim trims, so names, gateway
+// fields and required options are normalized exactly as in the Node SDK. Go's strings.TrimSpace
+// differs in two characters: it trims U+0085 (NEL), which JavaScript keeps, and keeps U+FEFF (a
+// stray BOM), which JavaScript trims.
+func trimSpace(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
+	})
 }

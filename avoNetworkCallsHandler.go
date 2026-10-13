@@ -2,168 +2,266 @@ package avoinspector
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"math/rand"
+	"errors"
+	"io"
+	"net"
 	"net/http"
+	"os"
+	"strconv"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
-type BaseBody struct {
-	ApiKey       string  `json:"apiKey"`
-	AppName      string  `json:"appName"`
-	AppVersion   string  `json:"appVersion"`
-	LibVersion   string  `json:"libVersion"`
-	Env          string  `json:"env"`
-	LibPlatform  string  `json:"libPlatform"`
-	MessageId    string  `json:"messageId"`
-	TrackingId   string  `json:"trackingId"`
-	CreatedAt    string  `json:"createdAt"`
-	SessionId    string  `json:"sessionId"`
-	SamplingRate float64 `json:"samplingRate"`
+// wireEvent is one element of the request body array (SPEC.md §7.3).
+type wireEvent struct {
+	ApiKey          string         `json:"apiKey"`
+	AppName         string         `json:"appName"`
+	AppVersion      *string        `json:"appVersion"`
+	LibVersion      string         `json:"libVersion"`
+	Env             string         `json:"env"`
+	LibPlatform     string         `json:"libPlatform"`
+	MessageId       string         `json:"messageId"`
+	StreamId        string         `json:"streamId"`
+	CreatedAt       string         `json:"createdAt"`
+	SamplingRate    float64        `json:"samplingRate"`
+	Type            string         `json:"type"`
+	EventName       string         `json:"eventName"`
+	OutputReference string         `json:"outputReference,omitempty"`
+	OriginHint      string         `json:"originHint,omitempty"`
+	EventProperties []wireProperty `json:"eventProperties"`
 }
 
-type SessionStartedBody struct {
-	BaseBody
-	Type string `json:"type"`
+// productionEndpoint is where every prod instance sends (SPEC.md §7.1).
+const productionEndpoint = "https://api.avo.app/inspector/v2/track"
+
+// trackingEndpoint is the URL used when the mock endpoint does not apply. It is a variable only so
+// tests can point it away from the real API: this package's tests set it directly, and the other
+// test binaries of this module through internal/testhooks. Nothing outside the module can.
+var trackingEndpoint = productionEndpoint
+
+const (
+	mockEndpointEnvVar = "AVO_INSPECTOR_MOCK_ENDPOINT"
+	gzipThresholdBytes = 1024
+	requestTimeout     = 10 * time.Second
+	maxResponseBytes   = 64 * 1024
+)
+
+type sendStatus int
+
+const (
+	sendOk sendStatus = iota
+	sendNon200
+	sendFailed
+)
+
+// sendResult is the outcome of one batch send (SPEC.md §7.5). samplingRate is set only when a 200
+// body carried a numeric samplingRate in [0, 1].
+type sendResult struct {
+	status       sendStatus
+	statusCode   int
+	samplingRate *float64
+	err          error
 }
 
-type EventSchemaBody struct {
-	BaseBody
-	Type            string     `json:"type"`
-	EventName       string     `json:"eventName"`
-	EventProperties []Property `json:"eventProperties"`
-	AvoFunction     bool       `json:"avoFunction"`
-	EventId         string     `json:"eventId"`
-	EventHash       string     `json:"eventHash"`
+// sendFailure is why a send failed. Its label is fixed text, used both in the log line and as the
+// log rate limiter's key, so neither can ever carry text from outside the package.
+type sendFailure struct {
+	label string
 }
 
-type AvoNetworkCallsHandler struct {
-	apiKey       string
-	envName      string
-	appName      string
-	appVersion   string
-	libVersion   string
-	samplingRate float64
-	shouldLog    bool
+func (f *sendFailure) Error() string { return f.label }
+
+// The send failures. They are compared by identity.
+var (
+	errUnsafeHeader   = &sendFailure{"apiKey contains a control character and cannot be sent as a header"}
+	errRequestTimeout = &sendFailure{"Request timed out"}
+	errRequestFailed  = &sendFailure{"Request failed"}
+	errRequestAborted = &sendFailure{"Request abandoned (destroyed)"}
+	// errSerialization replaces the encoder's own message, which quotes the value it rejected.
+	errSerialization = &sendFailure{"Request serialization failed"}
+)
+
+// networkCallsHandler sends batches of events to the Inspector API (SPEC.md §7).
+type networkCallsHandler struct {
+	apiKey string
+	env    AvoInspectorEnv
+	client *http.Client
 }
 
-const trackingEndpoint = "https://api.avo.app/inspector/v1/track"
+// sharedTransport is shared by every inspector that is not given an Options.HTTPClient with its
+// own Transport. It is http.DefaultTransport with room for an idle connection per concurrent
+// sender: the default keeps 2 per host, so each round of 4 sends would reconnect twice. One shared
+// pool, rather than one per inspector, means an inspector dropped without Destroy leaves no
+// connections of its own behind. It is built when the first inspector is constructed, not at
+// package init, so changes main makes to http.DefaultTransport before that (a proxy, a root CA, a
+// tracing wrapper, httpmock) are honored.
+func sharedTransport() http.RoundTripper {
+	transportOnce.Do(func() { transport = newTransport(http.DefaultTransport) })
+	return transport
+}
 
-func newAvoNetworkCallsHandler(apiKey, envName, appName, appVersion, libVersion string, shouldLog bool) *AvoNetworkCallsHandler {
-	return &AvoNetworkCallsHandler{
-		apiKey:       apiKey,
-		envName:      envName,
-		appName:      appName,
-		appVersion:   appVersion,
-		libVersion:   libVersion,
-		samplingRate: 1.0,
-		shouldLog:    shouldLog,
+// transport is built once by sharedTransport; transportOnce is a variable only so tests can
+// rebuild it.
+var (
+	transportOnce = &sync.Once{}
+	transport     http.RoundTripper
+)
+
+// newTransport clones base with an idle connection per concurrent sender. A base that is not an
+// *http.Transport, such as a default transport an APM or tracing library replaced with a wrapper,
+// is used as is: the default idle limit costs reconnects, a failed assertion at init would crash.
+func newTransport(base http.RoundTripper) http.RoundTripper {
+	plain, ok := base.(*http.Transport)
+	if !ok {
+		return base
 	}
+	t := plain.Clone()
+	t.MaxIdleConnsPerHost = maxConcurrentSends
+	return t
 }
 
-func (h *AvoNetworkCallsHandler) callInspectorWithBatchBody(events []interface{}) error {
-	eventsPayload, err := json.Marshal(events)
-	if err != nil {
-		return fmt.Errorf("could not marshal events: %v", err)
+// newNetworkCallsHandler builds the handler's client from base (Options.HTTPClient), or from the
+// shared transport when base is nil. base is copied, never modified, and the copy always gets the
+// SDK's limits: a timeout of at most requestTimeout, and no redirects.
+func newNetworkCallsHandler(apiKey string, env AvoInspectorEnv, base *http.Client) *networkCallsHandler {
+	client := &http.Client{}
+	if base != nil {
+		*client = *base
 	}
-
-	if len(events) == 0 {
-		return nil
+	if client.Transport == nil {
+		client.Transport = sharedTransport()
 	}
+	if client.Timeout <= 0 || client.Timeout > requestTimeout {
+		client.Timeout = requestTimeout
+	}
+	// Never follow a redirect: it would carry the api-key header to another host. The 3xx is
+	// returned as is and handled as a non-200.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &networkCallsHandler{apiKey: apiKey, env: env, client: client}
+}
 
-	if rand.Float64() > h.samplingRate {
-		if h.shouldLog {
-			log.Println("Avo Inspector: last event schema dropped due to sampling rate.")
+// endpoint resolves the request URL. AVO_INSPECTOR_MOCK_ENDPOINT is honored only for non-prod
+// instances, so a prod instance can never be redirected by the environment (SPEC.md §7.1).
+func (h *networkCallsHandler) endpoint() string {
+	if h.env != Prod {
+		if override := os.Getenv(mockEndpointEnvVar); override != "" {
+			return override
 		}
-		return nil
+	}
+	return trackingEndpoint
+}
+
+// isSafeHeaderValue reports whether value can be sent as a header value. SPEC.md §7.2 requires
+// refusing CR, LF and NUL; every other Unicode control character (C0, DEL and C1) except tab is
+// refused too, the same set the Node and Java SDKs refuse, and so is invalid UTF-8.
+func isSafeHeaderValue(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) && r != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// send posts one batch and never retries. ctx is cancelled by Destroy to abandon the request.
+func (h *networkCallsHandler) send(ctx context.Context, events []wireEvent) sendResult {
+	// SPEC.md §7.2: refuse the send rather than rely on the HTTP client to reject (or pass through)
+	// a control character in the only caller-supplied header value.
+	if !isSafeHeaderValue(h.apiKey) {
+		return sendResult{status: sendFailed, err: errUnsafeHeader}
 	}
 
-	if h.shouldLog {
-		for _, event := range events {
-			switch e := event.(type) {
-			case SessionStartedBody:
-				log.Println("Avo Inspector: sending session started event.")
-			case EventSchemaBody:
-				eventSchemaBody := e
-				log.Printf("Avo Inspector: sending event %s with schema %v\n", eventSchemaBody.EventName, eventSchemaBody.EventProperties)
-			}
+	payload, err := json.Marshal(events)
+	if err != nil {
+		return sendResult{status: sendFailed, err: errSerialization}
+	}
+	gzipped := false
+	if len(payload) >= gzipThresholdBytes {
+		if compressed, err := gzipBytes(payload); err == nil {
+			payload = compressed
+			gzipped = true
 		}
 	}
 
-	client := http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, trackingEndpoint, bytes.NewReader(eventsPayload))
+	url := h.endpoint()
+	if observe := testhooks.ObserveRequest; observe != nil {
+		observe(url)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("could not create request: %v", err)
+		return sendResult{status: sendFailed, err: errRequestFailed}
+	}
+	// Content-Length is set by net/http from the fully-buffered body.
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("api-key", h.apiKey)
+	req.Header.Set("env", string(h.env))
+	req.Header.Set("X-Avo-Client", LibPlatform)
+	if gzipped {
+		req.Header.Set("Content-Encoding", "gzip")
 	}
 
-	req.Header.Set("Content-Type", "text/plain")
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(eventsPayload)))
-
-	res, err := client.Do(req)
+	res, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %v", err)
+		var netErr net.Error
+		if errors.Is(err, context.Canceled) {
+			return sendResult{status: sendFailed, err: errRequestAborted}
+		}
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return sendResult{status: sendFailed, err: errRequestTimeout}
+		}
+		return sendResult{status: sendFailed, err: errRequestFailed}
 	}
 	defer res.Body.Close()
+	// Read one byte past the limit: LimitReader reports a clean EOF at the limit, so only the extra
+	// byte tells a body that fits from one that was cut off.
+	body, readErr := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("request returned non-200 status code: %d", res.StatusCode)
+		return sendResult{status: sendNon200, statusCode: res.StatusCode, err: errors.New("Inspector API returned status " + strconv.Itoa(res.StatusCode))}
 	}
-
-	// Read response body
-	responseBody, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %v", err)
+	// The status decides: a 200 is delivered even when its body is cut off (by the connection or
+	// by the read limit), but a cut-off body is not read for a samplingRate, even when the bytes
+	// that arrived parse.
+	if readErr != nil || len(body) > maxResponseBytes {
+		return sendResult{status: sendOk}
 	}
-
-	// Parse response body
-	var responseData struct {
-		SamplingRate float64 `json:"samplingRate"`
-	}
-
-	err = json.Unmarshal(responseBody, &responseData)
-	if err != nil {
-		return fmt.Errorf("failed to parse response body: %v", err)
-	}
-
-	h.samplingRate = responseData.SamplingRate
-
-	return nil
+	return sendResult{status: sendOk, samplingRate: parseSamplingRate(body)}
 }
 
-func (avo *AvoNetworkCallsHandler) bodyForSessionStartedCall(sessionId string) SessionStartedBody {
-	sessionBody := SessionStartedBody{
-		BaseBody: avo.createBaseCallBody(sessionId),
-		Type:     "sessionStarted",
+// parseSamplingRate returns the samplingRate of a 200 body when it is a number in [0, 1], and nil
+// otherwise — including for {"success": false}, which must leave the current rate unchanged
+// (SPEC.md §7.4, §7.7).
+func parseSamplingRate(body []byte) *float64 {
+	var response map[string]interface{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil
 	}
-	return sessionBody
+	rate, ok := response["samplingRate"].(float64)
+	if !ok || rate < 0 || rate > 1 {
+		return nil
+	}
+	return &rate
 }
 
-func (avo *AvoNetworkCallsHandler) bodyForEventSchemaCall(sessionId string, eventName string, eventProperties []Property) EventSchemaBody {
-	eventSchemaBody := EventSchemaBody{
-		BaseBody:        avo.createBaseCallBody(sessionId),
-		Type:            "event",
-		EventName:       eventName,
-		EventProperties: eventProperties,
+func gzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(data); err != nil {
+		return nil, err
 	}
-
-	return eventSchemaBody
-}
-
-func (avo *AvoNetworkCallsHandler) createBaseCallBody(sessionId string) BaseBody {
-	return BaseBody{
-		ApiKey:       avo.apiKey,
-		AppName:      avo.appName,
-		AppVersion:   avo.appVersion,
-		LibVersion:   avo.libVersion,
-		Env:          avo.envName,
-		LibPlatform:  "go",
-		MessageId:    newGuid(),
-		TrackingId:   "",
-		CreatedAt:    time.Now().Format(time.RFC3339),
-		SessionId:    sessionId,
-		SamplingRate: avo.samplingRate,
+	if err := writer.Close(); err != nil {
+		return nil, err
 	}
+	return buf.Bytes(), nil
 }
