@@ -279,7 +279,17 @@ the process exits (see [Shutdown](#shutdown)).
 ### Stream id and gateway options
 
 `StreamId` and the gateway fields are fields of `InspectorEvent` (see the example under
-[Sending event schemas](#sending-event-schemas)). `StreamId` is a correlation id, sent verbatim;
+[Sending event schemas](#sending-event-schemas)).
+
+**Call shape (SPEC.md §4.2.1).** The spec lists Go with the languages that group the gateway fields
+in one optional options struct, trailing after `eventName, eventProperties, streamId`, and asks
+SDKs to keep their existing call working. This SDK deliberately goes further: every input,
+including the event name and properties, is a field of the one `InspectorEvent` struct, so each
+input is named at the call site and a new field never changes the signature again. The cost is that
+v1's two-argument `TrackSchemaFromEvent(eventName, properties)` is gone: because v2 has a new import
+path no existing build breaks, but each v1 call site is rewritten once on upgrade (see
+[Upgrading from v1 to v2](#upgrading-from-v1-to-v2)). The wire body is the one the spec defines,
+byte for byte. `StreamId` is a correlation id, sent verbatim;
 `""` means none.
 
 Every gateway field can be left empty; blank values are left out of the event; with a gateway-scoped API key, pass the ones described under

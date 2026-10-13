@@ -6,7 +6,7 @@ Implements [avohq/spec-first-inspector-server-sdk](https://github.com/avohq/spec
 
 Breaking changes:
 
-- **`TrackSchemaFromEvent(event InspectorEvent)` is the only tracking call.** `InspectorEvent` carries `EventName`, `EventProperties` (or `OrderedEventProperties`, an `OrderedMap` whose order the schema keeps), `StreamId`, `OutputReference`, `OriginHint` and `OriginAppVersion`; every field is optional. It replaces v1's `TrackSchemaFromEvent(eventName, properties)`: write `TrackSchemaFromEvent(avoinspector.InspectorEvent{EventName: eventName, EventProperties: properties})`.
+- **`TrackSchemaFromEvent(event InspectorEvent)` is the only tracking call.** This deliberately deviates from SPEC.md §4.2.1, which groups only the gateway fields in a trailing options struct for Go and keeps the existing call: every input is a named field of one struct instead, so v1 call sites are rewritten once on upgrade (the README's [call shape](README.md#stream-id-and-gateway-options) note explains why). The call shape does not affect the wire body. `InspectorEvent` carries `EventName`, `EventProperties` (or `OrderedEventProperties`, an `OrderedMap` whose order the schema keeps), `StreamId`, `OutputReference`, `OriginHint` and `OriginAppVersion`; every field is optional. It replaces v1's `TrackSchemaFromEvent(eventName, properties)`: write `TrackSchemaFromEvent(avoinspector.InspectorEvent{EventName: eventName, EventProperties: properties})`.
 - **The module path is now `github.com/avohq/go-avo-inspector/v2`.**
 - **`Property` gained `ListChildren`** (see below), so a positional `Property` literal with three values no longer compiles.
 
