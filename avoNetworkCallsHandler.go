@@ -21,21 +21,21 @@ import (
 
 // wireEvent is one element of the request body array (SPEC.md §7.3).
 type wireEvent struct {
-	ApiKey          string     `json:"apiKey"`
-	AppName         string     `json:"appName"`
-	AppVersion      *string    `json:"appVersion"`
-	LibVersion      string     `json:"libVersion"`
-	Env             string     `json:"env"`
-	LibPlatform     string     `json:"libPlatform"`
-	MessageId       string     `json:"messageId"`
-	StreamId        string     `json:"streamId"`
-	CreatedAt       string     `json:"createdAt"`
-	SamplingRate    float64    `json:"samplingRate"`
-	Type            string     `json:"type"`
-	EventName       string     `json:"eventName"`
-	OutputReference string     `json:"outputReference,omitempty"`
-	OriginHint      string     `json:"originHint,omitempty"`
-	EventProperties []Property `json:"eventProperties"`
+	ApiKey          string         `json:"apiKey"`
+	AppName         string         `json:"appName"`
+	AppVersion      *string        `json:"appVersion"`
+	LibVersion      string         `json:"libVersion"`
+	Env             string         `json:"env"`
+	LibPlatform     string         `json:"libPlatform"`
+	MessageId       string         `json:"messageId"`
+	StreamId        string         `json:"streamId"`
+	CreatedAt       string         `json:"createdAt"`
+	SamplingRate    float64        `json:"samplingRate"`
+	Type            string         `json:"type"`
+	EventName       string         `json:"eventName"`
+	OutputReference string         `json:"outputReference,omitempty"`
+	OriginHint      string         `json:"originHint,omitempty"`
+	EventProperties []wireProperty `json:"eventProperties"`
 }
 
 // productionEndpoint is where every prod instance sends (SPEC.md §7.1).

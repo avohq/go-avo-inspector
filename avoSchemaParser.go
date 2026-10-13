@@ -45,31 +45,65 @@ type Property struct {
 // MarshalJSON writes the wire shape of SPEC.md §7.3.4: "children" is present (possibly empty) for
 // "object" and list types and absent for scalar types.
 func (p Property) MarshalJSON() ([]byte, error) {
-	type scalar struct {
-		PropertyName string `json:"propertyName"`
-		PropertyType string `json:"propertyType"`
-	}
-	type withChildren struct {
-		PropertyName string      `json:"propertyName"`
-		PropertyType string      `json:"propertyType"`
-		Children     interface{} `json:"children"`
-	}
+	return json.Marshal(p.toWire())
+}
+
+// wireProperty is Property's wire shape as a plain struct, with no MarshalJSON of its own, so a
+// whole schema encodes in one pass: encoding/json re-scans and compacts the output of every
+// MarshalJSON call, which for nested Property values meant scanning each byte once per level.
+// Children is nil for a scalar type (and omitted), and a non-nil slice for "object" and list types.
+type wireProperty struct {
+	PropertyName string      `json:"propertyName"`
+	PropertyType string      `json:"propertyType"`
+	Children     interface{} `json:"children,omitempty"`
+}
+
+func (p Property) toWire() wireProperty {
+	wire := wireProperty{PropertyName: p.PropertyName, PropertyType: p.PropertyType}
 	switch {
 	case p.PropertyType == "object":
-		children := p.Children
+		children := toWireProperties(p.Children)
 		if children == nil {
-			children = []Property{}
+			children = []wireProperty{}
 		}
-		return json.Marshal(withChildren{p.PropertyName, p.PropertyType, children})
+		wire.Children = children
 	case strings.HasPrefix(p.PropertyType, "list("):
-		children := p.ListChildren
-		if children == nil {
-			children = []interface{}{}
-		}
-		return json.Marshal(withChildren{p.PropertyName, p.PropertyType, children})
-	default:
-		return json.Marshal(scalar{p.PropertyName, p.PropertyType})
+		wire.Children = toWireListChildren(p.ListChildren)
 	}
+	return wire
+}
+
+// toWireProperties converts a schema to its wire shape. The result shares no slice with schema, so
+// it is also the copy a queued event keeps. A nil schema stays nil.
+func toWireProperties(schema []Property) []wireProperty {
+	if schema == nil {
+		return nil
+	}
+	wire := make([]wireProperty, len(schema))
+	for i, property := range schema {
+		wire[i] = property.toWire()
+	}
+	return wire
+}
+
+// toWireListChildren converts a list property's element schemas; nil becomes an empty list.
+func toWireListChildren(children []interface{}) []interface{} {
+	wire := make([]interface{}, len(children))
+	for i, child := range children {
+		switch c := child.(type) {
+		case []Property:
+			converted := toWireProperties(c)
+			if converted == nil {
+				converted = []wireProperty{}
+			}
+			wire[i] = converted
+		case []interface{}:
+			wire[i] = toWireListChildren(c)
+		default:
+			wire[i] = c
+		}
+	}
+	return wire
 }
 
 // UnmarshalJSON is the inverse of MarshalJSON: "children" goes to Children for an "object"
@@ -729,39 +763,4 @@ func indirect(rv reflect.Value) reflect.Value {
 		rv = rv.Elem()
 	}
 	return rv
-}
-
-// copySchema returns a deep copy of schema, so the copy shares no slice with it at any depth.
-func copySchema(schema []Property) []Property {
-	if schema == nil {
-		return nil
-	}
-	copied := make([]Property, len(schema))
-	for i, property := range schema {
-		copied[i] = Property{
-			PropertyName: property.PropertyName,
-			PropertyType: property.PropertyType,
-			Children:     copySchema(property.Children),
-			ListChildren: copyListChildren(property.ListChildren),
-		}
-	}
-	return copied
-}
-
-func copyListChildren(children []interface{}) []interface{} {
-	if children == nil {
-		return nil
-	}
-	copied := make([]interface{}, len(children))
-	for i, child := range children {
-		switch c := child.(type) {
-		case []Property:
-			copied[i] = copySchema(c)
-		case []interface{}:
-			copied[i] = copyListChildren(c)
-		default:
-			copied[i] = c
-		}
-	}
-	return copied
 }

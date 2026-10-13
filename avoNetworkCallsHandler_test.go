@@ -114,7 +114,7 @@ func TestWire_GzipThresholdBoundary(t *testing.T) {
 	handler := newNetworkCallsHandler("k", Dev, nil)
 	for _, size := range []int{1023, 1024} {
 		server := newTestServer(t, nil)
-		event := wireEvent{EventProperties: []Property{}}
+		event := wireEvent{EventProperties: []wireProperty{}}
 		base, _ := json.Marshal([]wireEvent{event})
 		event.EventName = strings.Repeat("x", size-len(base))
 		if body, _ := json.Marshal([]wireEvent{event}); len(body) != size {
@@ -149,7 +149,7 @@ func TestWire_HeaderControlCharacterGuard(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\r\nX-Injected: 1", "key\n", "ke\x00y"} {
 		handler := newNetworkCallsHandler(apiKey, Dev, nil)
-		result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := handler.send(context.Background(), []wireEvent{{EventProperties: []wireProperty{}}})
 		if result.status != sendFailed || !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: expected errUnsafeHeader, got %v (%v)", apiKey, result.status, result.err)
 		}
@@ -229,7 +229,7 @@ func TestWire_RequestTimeout(t *testing.T) {
 	defer close(release)
 	handler := newNetworkCallsHandler("k", Dev, nil)
 	handler.client.Timeout = 50 * time.Millisecond
-	result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+	result := handler.send(context.Background(), []wireEvent{{EventProperties: []wireProperty{}}})
 	if result.status != sendFailed || !errors.Is(result.err, errRequestTimeout) {
 		t.Errorf("expected %q, got %v", errRequestTimeout, result.err)
 	}
@@ -250,7 +250,7 @@ func TestWire_RedirectIsNotFollowed(t *testing.T) {
 		newTestServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, other.URL, status)
 		})
-		result := newNetworkCallsHandler("secret-key", Dev, nil).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler("secret-key", Dev, nil).send(context.Background(), []wireEvent{{EventProperties: []wireProperty{}}})
 		if result.status != sendNon200 {
 			t.Errorf("%d: expected a non-200 result, got %v (%v)", status, result.status, result.err)
 		}
@@ -300,7 +300,7 @@ func TestWire_ConcurrentSendsReuseTheirConnections(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}}); result.status != sendOk {
+				if result := handler.send(context.Background(), []wireEvent{{EventProperties: []wireProperty{}}}); result.status != sendOk {
 					t.Errorf("send failed: %+v", result)
 				}
 			}()

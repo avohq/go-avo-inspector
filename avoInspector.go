@@ -446,8 +446,9 @@ func (inspector *AvoInspector) newWireEvent(event InspectorEvent, samplingRate f
 		EventName:       event.EventName,
 		OutputReference: outputReference,
 		OriginHint:      originHint,
-		// A copy: the caller gets schema back and may change it before the event is sent.
-		EventProperties: copySchema(schema),
+		// A copy in wire shape: the caller gets schema back and may change it before the event
+		// is sent.
+		EventProperties: toWireProperties(schema),
 	}
 }
 
@@ -949,7 +950,7 @@ func logf(format string, args ...interface{}) {
 // line. It is the only form of event properties that may be logged: logging is process-wide, so a
 // dev instance can turn it on for a prod one, and raw values can hold personal data.
 func schemaForLog(schema []Property) string {
-	encoded, err := json.Marshal(schema)
+	encoded, err := json.Marshal(toWireProperties(schema))
 	if err != nil {
 		return "[]"
 	}
