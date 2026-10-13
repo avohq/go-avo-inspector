@@ -100,9 +100,9 @@ func TestLoggingIsProcessWide(t *testing.T) {
 	if !shouldLog.Load() {
 		t.Errorf("EnableLogging(true) on one instance must enable logging for all")
 	}
-	second.ShouldLog(false)
+	second.EnableLogging(false)
 	if shouldLog.Load() {
-		t.Errorf("deprecated ShouldLog(false) must disable the process-wide flag")
+		t.Errorf("EnableLogging(false) on another instance must disable logging for all")
 	}
 }
 
@@ -820,7 +820,7 @@ func TestNewAvoInspector_RejectsEveryControlCharacterButTab(t *testing.T) {
 		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
 			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
-		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}
@@ -882,7 +882,7 @@ func TestNewAvoInspector_RejectsInvalidUTF8(t *testing.T) {
 		if err == nil || err.Error() != "[Avo Inspector] apiKey must not contain control characters" || inspector != nil {
 			t.Errorf("apiKey %q: expected the control-character message, got (%v, %v)", apiKey, inspector, err)
 		}
-		result := newAvoNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler(apiKey, Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: send-time guard did not refuse it: %v", apiKey, result.err)
 		}

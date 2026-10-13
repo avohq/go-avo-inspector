@@ -111,7 +111,7 @@ func TestWire_GzipAtThreshold(t *testing.T) {
 
 // The threshold is on the serialized byte length: 1023 bytes stays plain, 1024 is compressed.
 func TestWire_GzipThresholdBoundary(t *testing.T) {
-	handler := newAvoNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev)
 	for _, size := range []int{1023, 1024} {
 		server := newTestServer(t, nil)
 		event := wireEvent{EventProperties: []Property{}}
@@ -148,7 +148,7 @@ func TestWire_GzipIsRFC1952(t *testing.T) {
 func TestWire_HeaderControlCharacterGuard(t *testing.T) {
 	server := newTestServer(t, nil)
 	for _, apiKey := range []string{"key\r\nX-Injected: 1", "key\n", "ke\x00y"} {
-		handler := newAvoNetworkCallsHandler(apiKey, Dev)
+		handler := newNetworkCallsHandler(apiKey, Dev)
 		result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if result.status != sendFailed || !errors.Is(result.err, errUnsafeHeader) {
 			t.Errorf("apiKey %q: expected errUnsafeHeader, got %v (%v)", apiKey, result.status, result.err)
@@ -208,14 +208,14 @@ func TestWire_MockEndpointIgnoredInProd(t *testing.T) {
 	if productionEndpoint != "https://api.avo.app/inspector/v2/track" {
 		t.Errorf("unexpected production endpoint %q", productionEndpoint)
 	}
-	if got := newAvoNetworkCallsHandler("k", Prod).endpoint(); got != trackingEndpoint {
+	if got := newNetworkCallsHandler("k", Prod).endpoint(); got != trackingEndpoint {
 		t.Errorf("prod must ignore the mock endpoint, got %q", got)
 	}
-	if got := newAvoNetworkCallsHandler("k", Staging).endpoint(); got != "http://attacker.example" {
+	if got := newNetworkCallsHandler("k", Staging).endpoint(); got != "http://attacker.example" {
 		t.Errorf("staging must honor the mock endpoint, got %q", got)
 	}
 	t.Setenv(mockEndpointEnvVar, "")
-	if got := newAvoNetworkCallsHandler("k", Dev).endpoint(); got != trackingEndpoint {
+	if got := newNetworkCallsHandler("k", Dev).endpoint(); got != trackingEndpoint {
 		t.Errorf("expected the v2 endpoint by default, got %q", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestWire_RequestTimeout(t *testing.T) {
 	release := make(chan struct{})
 	newTestServer(t, func(int, http.ResponseWriter, *http.Request) { <-release })
 	defer close(release)
-	handler := newAvoNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev)
 	handler.client.Timeout = 50 * time.Millisecond
 	result := handler.send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 	if result.status != sendFailed || !errors.Is(result.err, errRequestTimeout) {
@@ -250,7 +250,7 @@ func TestWire_RedirectIsNotFollowed(t *testing.T) {
 		newTestServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, other.URL, status)
 		})
-		result := newAvoNetworkCallsHandler("secret-key", Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
+		result := newNetworkCallsHandler("secret-key", Dev).send(context.Background(), []wireEvent{{EventProperties: []Property{}}})
 		if result.status != sendNon200 {
 			t.Errorf("%d: expected a non-200 result, got %v (%v)", status, result.status, result.err)
 		}
@@ -293,7 +293,7 @@ func TestWire_ConcurrentSendsReuseTheirConnections(t *testing.T) {
 	server.Start()
 	defer server.Close()
 	t.Setenv(mockEndpointEnvVar, server.URL)
-	handler := newAvoNetworkCallsHandler("k", Dev)
+	handler := newNetworkCallsHandler("k", Dev)
 	for round := 0; round < 3; round++ {
 		var wg sync.WaitGroup
 		for i := 0; i < maxConcurrentSends; i++ {

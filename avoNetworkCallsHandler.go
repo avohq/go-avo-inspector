@@ -18,46 +18,6 @@ import (
 	"github.com/avohq/go-avo-inspector/v2/internal/testhooks"
 )
 
-// BaseBody is the pre-3.0 wire body.
-//
-// Deprecated: no longer sent. The SDK now builds its own wire body (SPEC.md §7.3); this type is
-// kept only so existing code that references it still compiles.
-type BaseBody struct {
-	ApiKey       string  `json:"apiKey"`
-	AppName      string  `json:"appName"`
-	AppVersion   string  `json:"appVersion"`
-	LibVersion   string  `json:"libVersion"`
-	Env          string  `json:"env"`
-	LibPlatform  string  `json:"libPlatform"`
-	MessageId    string  `json:"messageId"`
-	TrackingId   string  `json:"trackingId"`
-	CreatedAt    string  `json:"createdAt"`
-	SessionId    string  `json:"sessionId"`
-	SamplingRate float64 `json:"samplingRate"`
-}
-
-// SessionStartedBody is the pre-3.0 session-started wire body.
-//
-// Deprecated: no longer sent; server SDKs do not model sessions (SPEC.md §3.3). Kept only so
-// existing code that references it still compiles.
-type SessionStartedBody struct {
-	BaseBody
-	Type string `json:"type"`
-}
-
-// EventSchemaBody is the pre-3.0 event wire body.
-//
-// Deprecated: no longer sent. Kept only so existing code that references it still compiles.
-type EventSchemaBody struct {
-	BaseBody
-	Type            string     `json:"type"`
-	EventName       string     `json:"eventName"`
-	EventProperties []Property `json:"eventProperties"`
-	AvoFunction     bool       `json:"avoFunction"`
-	EventId         string     `json:"eventId"`
-	EventHash       string     `json:"eventHash"`
-}
-
 // wireEvent is one element of the request body array (SPEC.md §7.3).
 type wireEvent struct {
 	ApiKey          string     `json:"apiKey"`
@@ -127,8 +87,8 @@ var (
 	errSerialization = &sendFailure{"Request serialization failed"}
 )
 
-// AvoNetworkCallsHandler sends batches of events to the Inspector API (SPEC.md §7).
-type AvoNetworkCallsHandler struct {
+// networkCallsHandler sends batches of events to the Inspector API (SPEC.md §7).
+type networkCallsHandler struct {
 	apiKey string
 	env    AvoInspectorEnv
 	client *http.Client
@@ -153,8 +113,8 @@ func newTransport(base http.RoundTripper) http.RoundTripper {
 	return t
 }
 
-func newAvoNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *AvoNetworkCallsHandler {
-	return &AvoNetworkCallsHandler{
+func newNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *networkCallsHandler {
+	return &networkCallsHandler{
 		apiKey: apiKey,
 		env:    env,
 		client: &http.Client{
@@ -169,7 +129,7 @@ func newAvoNetworkCallsHandler(apiKey string, env AvoInspectorEnv) *AvoNetworkCa
 
 // endpoint resolves the request URL. AVO_INSPECTOR_MOCK_ENDPOINT is honored only for non-prod
 // instances, so a prod instance can never be redirected by the environment (SPEC.md §7.1).
-func (h *AvoNetworkCallsHandler) endpoint() string {
+func (h *networkCallsHandler) endpoint() string {
 	if h.env != Prod {
 		if override := os.Getenv(mockEndpointEnvVar); override != "" {
 			return override
@@ -194,7 +154,7 @@ func isSafeHeaderValue(value string) bool {
 }
 
 // send posts one batch and never retries. ctx is cancelled by Destroy to abandon the request.
-func (h *AvoNetworkCallsHandler) send(ctx context.Context, events []wireEvent) sendResult {
+func (h *networkCallsHandler) send(ctx context.Context, events []wireEvent) sendResult {
 	// SPEC.md §7.2: refuse the send rather than rely on the HTTP client to reject (or pass through)
 	// a control character in the only caller-supplied header value.
 	if !isSafeHeaderValue(h.apiKey) {

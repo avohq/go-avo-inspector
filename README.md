@@ -175,8 +175,7 @@ applies to every inspector in the process. Do not enable logs in production.
 avoInspector.EnableLogging(true)
 ```
 
-`ShouldLog` still works and is deprecated in favour of `EnableLogging`. Logs go to stderr by
-default; `SetLogOutput` routes them elsewhere, for every inspector in the process, for example into
+Logs go to stderr by default; `SetLogOutput` routes them elsewhere, for every inspector in the process, for example into
 your own logger or to `io.Discard` to silence them all, including the always-on lines below:
 
 ```go
@@ -384,9 +383,12 @@ or timer, so one you stop using after a `Flush` is garbage-collected even withou
   })
   ```
 
-  It is the only tracking call. The constructors and the other v1.0.0 methods keep their
-  signatures, and every v1.0.0 type still exists. `Flush` is new in v2: call it before the
-  process exits, or buffered events are lost.
+  It is the only tracking call. The constructors keep their signatures. `Flush` is new in v2:
+  call it before the process exits, or buffered events are lost.
+- **`ShouldLog` is now `EnableLogging`.** Rename the call: `inspector.ShouldLog(x)` becomes
+  `inspector.EnableLogging(x)`.
+- **The v1 wire types are gone.** `BaseBody`, `SessionStartedBody`, `EventSchemaBody` and
+  `AvoNetworkCallsHandler` described a wire format v2 no longer sends; remove any references.
 - **`Property` gained a field.** `Property` adds `ListChildren`, so a positional `Property` literal
   with three values no longer compiles. Use field names in the literal, or add the fourth value.
 
@@ -416,7 +418,7 @@ These are the behaviour changes you may notice:
   once; past 10,000 waiting events the oldest are dropped. A backfill job that relied on v1's
   synchronous sends to pace it should set `BlockWhenBacklogged` (see
   [High-volume and backfill jobs](#high-volume-and-backfill-jobs)).
-- **`ShouldLog` is process-wide.** It now sets one flag for every inspector in the process. It gates
+- **Logging is process-wide.** `EnableLogging` sets one flag for every inspector in the process. It gates
   only the debug lines (per-event lines, sampling drops) and the "sent N event(s)." line. Dropped
   events, rejected batches, failed sends and internal errors are always logged, rate-limited (see
   [Enabling logs](#enabling-logs)).

@@ -150,7 +150,7 @@ type AvoInspector struct {
 	environment            AvoInspectorEnv
 	version                string
 	appName                string
-	avoNetworkCallsHandler *AvoNetworkCallsHandler
+	avoNetworkCallsHandler *networkCallsHandler
 
 	batchSize           int
 	batchFlushSeconds   float64
@@ -262,7 +262,7 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 		environment:            env,
 		version:                options.AppVersion,
 		appName:                options.AppName,
-		avoNetworkCallsHandler: newAvoNetworkCallsHandler(options.ApiKey, env),
+		avoNetworkCallsHandler: newNetworkCallsHandler(options.ApiKey, env),
 		batchSize:              batchSize,
 		batchFlushSeconds:      batchFlushSeconds,
 		maxQueueSize:           maxQueueSize,
@@ -281,13 +281,6 @@ func NewAvoInspectorWithOptions(options Options) (*AvoInspector, error) {
 // by default in Dev and off otherwise. Do not enable it in production.
 func (inspector *AvoInspector) EnableLogging(enable bool) {
 	shouldLog.Store(enable)
-}
-
-// ShouldLog turns diagnostic logging on or off for every inspector in the process.
-//
-// Deprecated: use EnableLogging.
-func (inspector *AvoInspector) ShouldLog(enable bool) {
-	inspector.EnableLogging(enable)
 }
 
 // ExtractSchema returns the schema of eventProperties without sending anything. Properties are

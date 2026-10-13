@@ -10,7 +10,10 @@ Breaking changes:
 - **The module path is now `github.com/avohq/go-avo-inspector/v2`.**
 - **`Property` gained `ListChildren`** (see below), so a positional `Property` literal with three values no longer compiles.
 
-The constructors, `ShouldLog` and the other v1.0.0 methods keep their signatures, and every v1.0.0 type still exists. `Flush` is new in v2 (see New API): v1 sent every event during the tracking call, so code upgrading from v1 must now call `Flush` before the process exits.
+- **`ShouldLog` is removed; use `EnableLogging`.** The migration is a rename: `inspector.ShouldLog(x)` becomes `inspector.EnableLogging(x)`, the setter name the spec (§4.4) and the other server SDKs use.
+- **The pre-3.0 wire types `BaseBody`, `SessionStartedBody` and `EventSchemaBody` are removed**, along with the exported `AvoNetworkCallsHandler` type, which had no exported constructor. They described a wire format (`sessionId`, `trackingId`, `sessionStarted`) the SDK no longer sends.
+
+The constructors keep their signatures. `Flush` is new in v2 (see New API): v1 sent every event during the tracking call, so code upgrading from v1 must now call `Flush` before the process exits.
 
 New API:
 
@@ -19,12 +22,11 @@ New API:
 - **`OrderedMap` and `KeyValue`**, to keep property order, with `InspectorEvent.OrderedEventProperties` and `ExtractOrderedSchema`. A pointer to an `OrderedMap`, a named type based on it, and a bare `[]KeyValue` are read the same way, at the top level or nested.
 - **`ExtractSchema`** returns the schema without sending anything.
 - **`Flush(ctx context.Context)` and `Destroy()`.** `Flush` sends pending events and waits for in-flight sends until `ctx` is done, so it works directly with shutdown deadlines such as the context given to `http.Server.Shutdown`; a context without a deadline waits at most `DefaultFlushTimeout` (10 seconds), so `Flush` always completes. It returns `nil` only when, as it returns, nothing is buffered, waiting or in flight, and `ErrFlushTimeout` otherwise; the error is informational. An already-cancelled context starts the sends without waiting, so it returns `nil` only when nothing was pending.
-- **`EnableLogging`**, process-wide. `ShouldLog` still works and is deprecated in favour of it.
+- **`EnableLogging`**, process-wide. It replaces `ShouldLog` (see Breaking changes).
 - **`SetLogOutput(io.Writer)`**, process-wide: where every inspector writes its log lines, stderr by default (`nil` restores it). Route them into the host's logger, or pass `io.Discard` to silence them, the always-on lines included.
 - **`Property.ListChildren`** holds a list property's element schemas. `Property.Children` now holds only an `object` property's children. Adding the field means a positional `Property` literal with three values no longer compiles; use field names.
 - **`Property` decodes as well as encodes.** `UnmarshalJSON` is the inverse of `MarshalJSON`, so the schema JSON reads back into `[]Property`.
 - **`Version`, `SpecVersion`, `LibPlatform` and `MissingEventName` constants.** `libVersion` on the wire comes from `Version`.
-- `BaseBody`, `SessionStartedBody` and `EventSchemaBody` are deprecated and no longer sent; they remain so existing code compiles.
 
 Wire and schema:
 
